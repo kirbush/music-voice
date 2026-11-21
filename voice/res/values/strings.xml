@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Музыка голосом</string>
+    <string name="description">Выбирает результат в поиске Spotify по вашей голосовой команде.</string>
+</resources>
