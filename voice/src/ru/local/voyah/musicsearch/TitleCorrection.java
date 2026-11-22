@@ -24,7 +24,7 @@ final class TitleCorrection {
                 .replaceAll("[aeiouаеиоуыэюяьъ ]","").replaceAll("(.)\\1+","$1");
     }
     // Transliterate the ASR spelling before comparing an artist or title across scripts.
-    private static String sound(String s) {
+    static String sound(String s) {
         String ru="абвгдеёжзийклмнопрстуфхцчшщъыьэюя";
         String[] latin={"a","b","v","g","d","e","e","zh","z","i","y","k","l","m","n","o","p","r","s","t","u","f","h","ts","ch","sh","sh","","i","","e","yu","ya"};
         StringBuilder out=new StringBuilder();
@@ -61,6 +61,9 @@ final class TitleCorrection {
     }
     private static double similarity(String a,String b) {
         if(a.isEmpty() || b.isEmpty()) return 0;
+        return 1.0-editDistance(a,b)/(double)Math.max(a.length(),b.length());
+    }
+    static int editDistance(String a,String b) {
         int[] last=new int[b.length()+1];
         for(int j=0;j<last.length;j++) last[j]=j;
         for(int i=1;i<=a.length();i++) {
@@ -71,7 +74,7 @@ final class TitleCorrection {
                 diagonal=above;
             }
         }
-        return 1.0-last[b.length()]/(double)Math.max(a.length(),b.length());
+        return last[b.length()];
     }
     private static boolean nearName(String a,String b) {
         if(a.equals(b)) return true;
@@ -134,6 +137,42 @@ final class TitleCorrection {
         String remaster=title.replaceFirst(" (?:(?:19|20)\\d{2} )?remaster(?:ed)?(?: (?:19|20)\\d{2})?$","");
         return remaster.equals(title)?exact:Math.max(exact,creditScore(query,credit,remaster)-5);
     }
+    private static int trackScore(SpokenRequest request,String query,Row row) {
+        if(!request.hasTrackFields()) return trackScore(query,row);
+        String credit=trackCredit(row.subtitle), title=norm(row.title);
+        if(title.isEmpty() || credit.isEmpty() || query.length()>160) return 0;
+        String performer=norm(request.artist), spokenTitle=norm(request.title);
+        int score=fieldScore(performer,spokenTitle,credit,title);
+        String remaster=title.replaceFirst(" (?:(?:19|20)\\d{2} )?remaster(?:ed)?(?: (?:19|20)\\d{2})?$","");
+        if(!remaster.equals(title)) score=Math.max(score,fieldScore(performer,spokenTitle,credit,remaster)-5);
+        if(request.literalTitleAllowed) {
+            // A preposition can be part of the literal title. If both readings
+            // match exactly, neither should win by guessing from word order.
+            if(query.equals(title)) score=Math.max(score,100);
+            else if(sameName(query,title)) score=Math.max(score,97);
+        }
+        return score;
+    }
+    private static int fieldScore(String heardArtist,String heardTitle,String credit,String title) {
+        int score=pairScore(heardArtist,heardTitle,norm(credit),title);
+        if(score<100 && credit.contains(",")) {
+            for(String artist:credit.split(",\\s+")) {
+                String name=norm(artist);
+                if(!name.isEmpty()) score=Math.max(score,pairScore(heardArtist,heardTitle,name,title));
+            }
+        }
+        return score;
+    }
+    static boolean corroborates(SpokenRequest first,SpokenRequest alternate) {
+        if(first.needsName() || alternate.needsName() || !first.kind.equals(alternate.kind)) return false;
+        if(first.hasTrackFields()) return alternate.hasTrackFields() &&
+                sameTranscript(first.title,alternate.title) && sameTranscript(first.artist,alternate.artist);
+        return sameTranscript(first.query,alternate.query);
+    }
+    private static boolean sameTranscript(String first,String alternate) {
+        String left=compact(sound(norm(first))), right=compact(sound(norm(alternate)));
+        return !left.isEmpty() && left.equals(right);
+    }
     private static int creditScore(String query,String credit,String title) {
         int score=trackNameScore(query,norm(credit),title);
         if(score<100 && credit.contains(",")) {
@@ -165,12 +204,13 @@ final class TitleCorrection {
         }
         return score;
     }
-    static int bestTrack(String spoken,List<Row> tracks) {
-        String query=norm(spoken);
+    static int bestTrack(SpokenRequest request,List<Row> tracks) {
+        if(request.needsName()) return NO_TRACK;
+        String query=norm(request.query);
         int best=NO_TRACK, top=0, rival=0;
         for(int i=0;i<tracks.size();i++) {
             Row row=tracks.get(i);
-            int score=trackScore(query,row);
+            int score=trackScore(request,query,row);
             if(score==0) continue;
             boolean same=best>=0 && norm(row.title).equals(norm(tracks.get(best).title)) &&
                     sameName(norm(trackCredit(row.subtitle)),norm(trackCredit(tracks.get(best).subtitle)));
@@ -180,7 +220,7 @@ final class TitleCorrection {
             } else if(!same) rival=Math.max(rival,score);
         }
         if(best<0 || top-rival>=4) return best;
-        return best==0 && hasConfirmedTitleLeader(query,tracks)?best:AMBIGUOUS_TRACK;
+        return best==0 && !request.hasTrackFields() && hasConfirmedTitleLeader(query,tracks)?best:AMBIGUOUS_TRACK;
     }
     private static boolean hasConfirmedTitleLeader(String query,List<Row> tracks) {
         Row first=tracks.get(0);

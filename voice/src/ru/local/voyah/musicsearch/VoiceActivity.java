@@ -305,7 +305,7 @@ public class VoiceActivity extends Activity {
         launchSearch(ctx,SpokenRequest.parse(text),completed);
     }
     static void launchSearch(Context ctx,SpokenRequest request,java.util.function.Consumer<Boolean> completed) {
-        if(request.query.isEmpty()) throw new IllegalArgumentException("Название не распознано");
+        if(request.needsName()) throw new IllegalArgumentException("Запрос требует уточнения");
         if(SearchService.instance!=null) {
             SearchService.instance.search(request,completed);
             return;

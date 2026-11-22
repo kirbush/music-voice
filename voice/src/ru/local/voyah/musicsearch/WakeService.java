@@ -385,13 +385,13 @@ public class WakeService extends Service {
         try {
             String text=decode(samples,command.language,command.cancelled,command.engine);
             SpokenRequest request=nameRequest==null?SpokenRequest.parse(text):nameRequest.withName(text);
-            if(nameRequest==null && request.needsName() && !command.cancelled.isDone()) {
+            if(!request.needsName()) picked=searchWithFallback(request,samples,command.cancelled,
+                    command.language,command.retryDelay,command.engine);
+            if(nameRequest==null && !picked && !stopping && !command.cancelled.isDone()) {
                 // The microphone thread captures the next utterance for this command.
                 command.nameRequest=request;
                 return;
             }
-            if(!request.query.isEmpty()) picked=searchWithFallback(request,samples,command.cancelled,
-                    command.language,command.retryDelay,command.engine);
             if(!picked) error="Подходящий результат не найден";
         } catch(CancellationException ignored) {
             // A new wake word or a Spotify tap owns the interaction.
@@ -414,7 +414,8 @@ public class WakeService extends Service {
         String language=request.query.matches("(?s).*\\p{IsCyrillic}.*")?"en":"ru";
         onMain(()->{if(!manualPick.isDone()) state("Проверяю название ещё раз…");return true;});
         SpokenRequest alternate=request.withName(decode(samples,language,manualPick,engine));
-        return manualPick.isDone() || (!request.sameSearchAs(alternate) && select(alternate,manualPick));
+        return manualPick.isDone() || (!request.sameSearchAs(alternate) &&
+                TitleCorrection.corroborates(request,alternate) && select(alternate,manualPick));
     }
     private <T> T onMain(Callable<T> operation) throws Exception {
         FutureTask<T> task=new FutureTask<>(operation);
@@ -423,7 +424,7 @@ public class WakeService extends Service {
         finally {task.cancel(false);}
     }
     private boolean select(SpokenRequest request,CompletableFuture<Boolean> manualPick) throws Exception {
-        if(request.query.isEmpty()) return false;
+        if(request.needsName()) return false;
         CompletableFuture<Boolean> result=new CompletableFuture<>();
         onMain(()->{
             if(manualPick.isDone()) {result.complete(true); return true;}
