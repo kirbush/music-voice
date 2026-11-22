@@ -3,10 +3,19 @@ package ru.local.voyah.musicsearch;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 /** Use only names visible in Spotify's own results. The corrected query still needs a matching track row. */
 final class TitleCorrection {
     static final int NO_TRACK=-1, AMBIGUOUS_TRACK=-2;
+    // Ranking runs on every poll of the Spotify results, so the patterns are compiled once.
+    private static final Pattern SEPARATORS=Pattern.compile("[^\\p{L}\\p{Nd}]+");
+    private static final Pattern VOWELS=Pattern.compile("[aeiouаеиоуыэюяьъ ]");
+    private static final Pattern REPEATS=Pattern.compile("(.)\\1+");
+    private static final Pattern REMASTER=Pattern.compile(" (?:(?:19|20)\\d{2} )?remaster(?:ed)?(?: (?:19|20)\\d{2})?$");
+    private static final Pattern CREDIT_SEPARATOR=Pattern.compile(",\\s+");
+    private static final Pattern TITLE_DASH=Pattern.compile("\\s+[-–—]\\s+");
+    private static final Pattern LEADING_ARTICLE=Pattern.compile("^(?:the|a) ");
     static final class Row {
         final String title, subtitle;
         Row(String title,String subtitle) {this.title=title; this.subtitle=subtitle;}
@@ -17,11 +26,11 @@ final class TitleCorrection {
         this.title=title; this.artist=artist; this.score=score;
     }
     static String norm(String s) {
-        return s.toLowerCase(Locale.ROOT).replace('ё','е').replaceAll("[^\\p{L}\\p{Nd}]+"," ").trim();
+        return SEPARATORS.matcher(s.toLowerCase(Locale.ROOT).replace('ё','е')).replaceAll(" ").trim();
     }
     private static String consonants(String s) {
-        return s.replace("ph","f").replace("ck","k").replace('q','k').replace('c','k')
-                .replaceAll("[aeiouаеиоуыэюяьъ ]","").replaceAll("(.)\\1+","$1");
+        String heard=s.replace("ph","f").replace("ck","k").replace('q','k').replace('c','k');
+        return REPEATS.matcher(VOWELS.matcher(heard).replaceAll("")).replaceAll("$1");
     }
     // Transliterate the ASR spelling before comparing an artist or title across scripts.
     static String sound(String s) {
@@ -127,14 +136,14 @@ final class TitleCorrection {
     }
     private static String trackCredit(String subtitle) {
         int separator=subtitle.indexOf('•');
-        if(separator<0 || !norm(subtitle.substring(0,separator)).matches("трек|песня|song|track")) return "";
+        if(separator<0 || !SpotifyUi.isTrackType(norm(subtitle.substring(0,separator)))) return "";
         return subtitle.substring(separator+1).trim();
     }
     private static int trackScore(String query,Row row) {
         String credit=trackCredit(row.subtitle), title=norm(row.title);
         if(query.isEmpty() || query.length()>160 || title.isEmpty() || credit.isEmpty()) return 0;
         int exact=creditScore(query,credit,title);
-        String remaster=title.replaceFirst(" (?:(?:19|20)\\d{2} )?remaster(?:ed)?(?: (?:19|20)\\d{2})?$","");
+        String remaster=REMASTER.matcher(title).replaceFirst("");
         return remaster.equals(title)?exact:Math.max(exact,creditScore(query,credit,remaster)-5);
     }
     private static int trackScore(SpokenRequest request,String query,Row row) {
@@ -143,7 +152,7 @@ final class TitleCorrection {
         if(title.isEmpty() || credit.isEmpty() || query.length()>160) return 0;
         String performer=norm(request.artist), spokenTitle=norm(request.title);
         int score=fieldScore(performer,spokenTitle,credit,title);
-        String remaster=title.replaceFirst(" (?:(?:19|20)\\d{2} )?remaster(?:ed)?(?: (?:19|20)\\d{2})?$","");
+        String remaster=REMASTER.matcher(title).replaceFirst("");
         if(!remaster.equals(title)) score=Math.max(score,fieldScore(performer,spokenTitle,credit,remaster)-5);
         if(request.literalTitleAllowed) {
             // A preposition can be part of the literal title. If both readings
@@ -156,7 +165,7 @@ final class TitleCorrection {
     private static int fieldScore(String heardArtist,String heardTitle,String credit,String title) {
         int score=pairScore(heardArtist,heardTitle,norm(credit),title);
         if(score<100 && credit.contains(",")) {
-            for(String artist:credit.split(",\\s+")) {
+            for(String artist:CREDIT_SEPARATOR.split(credit)) {
                 String name=norm(artist);
                 if(!name.isEmpty()) score=Math.max(score,pairScore(heardArtist,heardTitle,name,title));
             }
@@ -176,7 +185,7 @@ final class TitleCorrection {
     private static int creditScore(String query,String credit,String title) {
         int score=trackNameScore(query,norm(credit),title);
         if(score<100 && credit.contains(",")) {
-            for(String name:credit.split(",\\s+")) {
+            for(String name:CREDIT_SEPARATOR.split(credit)) {
                 String artist=norm(name);
                 if(!artist.isEmpty()) score=Math.max(score,trackNameScore(query,artist,title));
             }
@@ -234,9 +243,35 @@ final class TitleCorrection {
         }
         return false;
     }
+    /** Every word of an album or playlist request appears in the row. One word may differ by a single edit. */
+    static boolean wordsMatch(String required,String title,String subtitle) {
+        String[] candidates=norm(title+" "+subtitle).split(" ");
+        int exact=0, near=0;
+        for(String word:required.split(" ")) {
+            boolean same=false, close=false;
+            for(String candidate:candidates) {
+                if(word.equals(candidate)) {same=true; break;}
+                if(word.length()>=4 && candidate.length()>=4 && oneEdit(word,candidate)) close=true;
+            }
+            if(same) exact++;
+            else if(close) near++;
+            else return false;
+        }
+        return exact>0 && near<=1;
+    }
+    private static boolean oneEdit(String left,String right) {
+        if(Math.abs(left.length()-right.length())>1) return false;
+        int a=0,b=0,errors=0;
+        while(a<left.length() && b<right.length()) {
+            if(left.charAt(a)==right.charAt(b)) {a++; b++; continue;}
+            if(++errors>1) return false;
+            if(left.length()>=right.length()) a++;
+            if(right.length()>=left.length()) b++;
+        }
+        return errors+left.length()-a+right.length()-b<=1;
+    }
     static boolean isArtist(Row row) {
-        String subtitle=norm(row.subtitle);
-        return subtitle.equals("исполнитель") || subtitle.equals("artist");
+        return SpotifyUi.isArtistSubtitle(norm(row.subtitle));
     }
     static int bestArtist(String spoken,List<Row> rows) {
         String query=norm(spoken);
@@ -261,8 +296,7 @@ final class TitleCorrection {
         if(q.length()>120) return null;
         List<String> artists=new ArrayList<>(knownArtists);
         for(Row row:rows) {
-            String type=norm(row.subtitle);
-            if(type.equals("artist") || type.equals("исполнитель")) artists.add(row.title);
+            if(isArtist(row)) artists.add(row.title);
             else if(row.subtitle.contains("•")) artists.add(row.subtitle.substring(row.subtitle.indexOf('•')+1).trim());
         }
         TitleCorrection best=null;
@@ -272,12 +306,13 @@ final class TitleCorrection {
             if(a.isEmpty() || a.length()>70) continue;
             String rest=artistTail(q,artist);
             if(rest.length()<5) continue;
+            String spoken=LEADING_ARTICLE.matcher(sound(rest)).replaceFirst("");
             for(Row row:rows) {
                 String title=row.title.trim();
                 String t=norm(title), sub=norm(row.subtitle);
-                boolean sameArtistTrack=(sub.startsWith("трек ") || sub.startsWith("track ") || sub.startsWith("song ")) && sub.endsWith(" "+a);
+                boolean sameArtistTrack=SpotifyUi.startsTrackCredit(sub) && sub.endsWith(" "+a);
                 if(!sameArtistTrack) {
-                    String[] parts=title.split("\\s+[-–—]\\s+",2);
+                    String[] parts=TITLE_DASH.split(title,2);
                     if(parts.length!=2) continue;
                     if(norm(parts[1]).equals(a)) title=parts[0];
                     else if(norm(parts[0]).equals(a)) title=parts[1];
@@ -285,8 +320,7 @@ final class TitleCorrection {
                     t=norm(title);
                 }
                 if(t.length()<4 || t.length()>120 || t.equals(a)) continue;
-                String spoken=sound(rest).replaceFirst("^(?:the|a) ","");
-                String target=sound(t).replaceFirst("^(?:the|a) ","");
+                String target=LEADING_ARTICLE.matcher(sound(t)).replaceFirst("");
                 String r=spoken.replace(" ",""), c=target.replace(" ","");
                 double literal=similarity(r,c);
                 String rc=consonants(spoken), tc=consonants(target);

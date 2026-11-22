@@ -8,10 +8,11 @@ import com.k2fsa.sherpa.onnx.*;
 final class LocalSpeech {
     private static OfflineRecognizer recognizer;
 
+    // No caller in the app. voice/bench invokes it by reflection (VoiceBench).
     static synchronized String transcribe(Context context, float[] samples) {
         return transcribe(context,samples,"");
     }
-    static synchronized String transcribe(Context context, float[] samples,String language) {
+    static synchronized void warm(Context context) {
         if(recognizer==null) {
             ModelStore files=ModelStore.get(context,VoiceSettings.BASE);
             if(!files.ready) throw new IllegalStateException("Сначала скачайте модели");
@@ -31,6 +32,9 @@ final class LocalSpeech {
             recognizer=new OfflineRecognizer(null,cfg);
             Log.i("MusicVoice","modelLoadMs="+(SystemClock.elapsedRealtime()-start));
         }
+    }
+    static synchronized String transcribe(Context context, float[] samples,String language) {
+        warm(context);
         long start=SystemClock.elapsedRealtime();
         OfflineStream stream=recognizer.createStream();
         try {

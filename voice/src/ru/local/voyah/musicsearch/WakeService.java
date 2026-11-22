@@ -4,11 +4,9 @@ import android.app.*;
 import android.content.*;
 import android.content.pm.ServiceInfo;
 import android.media.*;
-import android.media.audiofx.AcousticEchoCanceler;
 import android.os.*;
 import com.k2fsa.sherpa.onnx.*;
 import java.io.*;
-import java.util.Arrays;
 import java.util.concurrent.*;
 
 public class WakeService extends Service {
@@ -16,7 +14,7 @@ public class WakeService extends Service {
     static volatile String status="Прослушивание выключено";
     static volatile boolean active;
     static volatile boolean enrollmentRequested;
-    private volatile boolean stopping;
+    volatile boolean stopping;
     private final ExecutorService searches=Executors.newSingleThreadExecutor();
     // Command ownership and audio focus are transferred on the main looper.
     private volatile Command current;
@@ -36,12 +34,12 @@ public class WakeService extends Service {
         }
     }
     private final Handler main=new Handler(Looper.getMainLooper());
+    private final SpeechLink speech=new SpeechLink(this);
     private static final String CHANNEL="music_wake";
-    private static final int RATE=16000;
     private static final int START_REMINDER=32;
-    private volatile String inputStats="Нет замера";
+    volatile String inputStats="Нет замера";
     private volatile String lastCommand="";
-    private volatile String echoStatus="";
+    volatile String echoStatus="";
     @Override protected void dump(FileDescriptor fd, PrintWriter writer, String[] args) {
         writer.println("Слушатель активен: "+active);
         writer.println(inputStats);
@@ -49,6 +47,7 @@ public class WakeService extends Service {
         writer.println(lastCommand);
         String afterUpdate=SelectorAccess.updateStatus(this);
         if(!afterUpdate.isEmpty()) writer.println("Автовыбор после обновления: "+afterUpdate);
+        writer.println("Spotify: "+SpotifyUi.installedVersion(this)+", проверено на "+SpotifyUi.VERIFIED_VERSION);
     }
     static void event(Context c,String line) {
         android.util.Log.i("MusicVoice",line);
@@ -84,7 +83,6 @@ public class WakeService extends Service {
         context.stopService(new Intent(context,WakeService.class));
     }
     @Override public int onStartCommand(Intent i,int flags,int id) {
-        if(i!=null && "stop".equals(i.getAction())) {disable(this); return START_NOT_STICKY;}
         if(!active) {
             VoiceSettings settings=new VoiceSettings(this);
             NotificationManager manager=notifications(this);
@@ -103,9 +101,8 @@ public class WakeService extends Service {
             }
             if(!ModelStore.get(this,settings.engine()).ready) {status="Сначала скачайте модели";stopSelf();return START_NOT_STICKY;}
             manager.cancel(START_REMINDER);
-            String route=i==null?null:i.getStringExtra("route");
             active=true;
-            new Thread(()->listen(route==null?"primeback":route,automatic),"Spotify keyword").start();
+            new Thread(()->listen(automatic),"Spotify keyword").start();
         }
         return START_STICKY;
     }
@@ -116,47 +113,19 @@ public class WakeService extends Service {
     }
     @Override public IBinder onBind(Intent i) {return null;}
 
-    private AudioRecord recorder(int source) {
-        AudioFormat fmt=new AudioFormat.Builder().setSampleRate(RATE).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_IN_MONO).build();
-        AudioRecord r=new AudioRecord.Builder().setAudioSource(source).setAudioFormat(fmt)
-                .setPrivacySensitive(false).setBufferSizeInBytes(Math.max(8192,AudioRecord.getMinBufferSize(RATE,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT)*2)).build();
-        for(AudioDeviceInfo d:getSystemService(AudioManager.class).getDevices(AudioManager.GET_DEVICES_INPUTS)) {
-            if(d.getType()==AudioDeviceInfo.TYPE_USB_DEVICE || d.getType()==AudioDeviceInfo.TYPE_USB_HEADSET) {
-                r.setPreferredDevice(d); break;
-            }
-        }
-        try {
-            r.startRecording();
-            if(r.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING) throw new MicrophoneUnavailable("Микрофон недоступен");
-        } catch(RuntimeException failure) {
-            r.release();
-            if(failure instanceof IllegalStateException && !(failure instanceof MicrophoneUnavailable)) {
-                throw new MicrophoneUnavailable("Микрофон недоступен",failure);
-            }
-            throw failure;
-        }
-        return r;
-    }
-    private static final class MicrophoneUnavailable extends IllegalStateException {
-        MicrophoneUnavailable(String message) {super(message);}
-        MicrophoneUnavailable(String message,Throwable cause) {super(message,cause);}
-    }
     static KeywordSpotter spotter(Context context) throws IOException {return WakePhrase.create(context,new VoiceSettings(context).phrase());}
-    private String idleText() {return "Жду фразу «"+new VoiceSettings(this).phrase()+"»";}
-    private void listen(String route,boolean automatic) {
-        try {
-            try {listenSession(route);}
-            catch(MicrophoneUnavailable first) {
-                if(stopping) return;
-                state("Восстанавливаю вход микрофона");
-                SystemClock.sleep(1000);
-                if(!stopping) listenSession(route);
-            }
-        } catch(Exception | LinkageError e) {
+    String idleText() {return "Жду фразу «"+new VoiceSettings(this).phrase()+"»";}
+    static File profileFile(Context c,String phrase) {
+        // Normalized input contains letters and spaces only.
+        return new File(c.getFilesDir(),"voice-profile-"+WakePhrase.normalize(phrase)+".bin");
+    }
+    private void listen(boolean automatic) {
+        try {new KeywordLoop(this).run();}
+        catch(Exception | LinkageError e) {
             if(!stopping) {
                 status=String.valueOf(e.getMessage());
                 event(this,"Ошибка слушателя: "+e.getClass().getSimpleName());
-                if (automatic && (e instanceof MicrophoneUnavailable || e instanceof SecurityException)) {
+                if (automatic && (e instanceof KeywordLoop.MicrophoneUnavailable || e instanceof SecurityException)) {
                     main.post(()->{if(!stopping) showStartReminder(this);});
                 }
             }
@@ -165,139 +134,34 @@ public class WakeService extends Service {
             main.post(this::stopSelf);
         }
     }
-    private void listenSession(String route) throws Exception {
-        AudioRecord r=null;
-        AcousticEchoCanceler echo=null;
-        KeywordSpotter kws=null;
-        OnlineStream stream=null;
-        AudioManager am=getSystemService(AudioManager.class);
-        boolean priming=false;
-        try {
-            VoiceSettings settings=new VoiceSettings(this);
-            String phrase=settings.phrase();
-            kws=WakePhrase.create(this,phrase);
-            VoiceProfile profile=loadProfile(phrase);
-            stream=kws.createStream("");
-            if(route.startsWith("prime") && am.getMode()==AudioManager.MODE_NORMAL) {
-                am.setMode(AudioManager.MODE_IN_COMMUNICATION); priming=true;
-                AudioRecord warm=recorder(MediaRecorder.AudioSource.VOICE_COMMUNICATION);
-                try {SystemClock.sleep(700);} finally {warm.release();}
-            }
-            r=recorder(route.endsWith("back")?MediaRecorder.AudioSource.CAMCORDER:MediaRecorder.AudioSource.MIC);
-            if(priming) {SystemClock.sleep(400); am.setMode(AudioManager.MODE_NORMAL); priming=false;}
-            try {
-                if(AcousticEchoCanceler.isAvailable()) echo=AcousticEchoCanceler.create(r.getAudioSessionId());
-                if(echo!=null && echo.hasControl()) echo.setEnabled(true);
-                echoStatus="AEC: "+(echo!=null && echo.getEnabled()?"включён":"недоступен для этого входа");
-            } catch(RuntimeException e) { echoStatus="AEC: "+e.getClass().getSimpleName(); }
-            event(this,echoStatus);
-            state(idleText());
-            short[] buf=new short[640];
-            long since=SystemClock.elapsedRealtime(), audit=since, voiced=since;
-            int frames=0,peak=0;
-            while(!stopping) {
-                String selected=settings.phrase();
-                if(!selected.equals(phrase)) {
-                    stream.release();stream=null;kws.release();kws=null;
-                    kws=WakePhrase.create(this,selected);
-                    stream=kws.createStream("");
-                    phrase=selected;profile=loadProfile(phrase);
-                    if(current==null) state(idleText());
-                }
-                if(enrollmentRequested) {
-                    try {
-                        onMain(()->{if(current!=null) finishCommand(current,false,null);return true;});
-                        profile=enroll(r,phrase);
-                        state("Голосовой образец сохранён. "+idleText());
-                    } catch(Exception e) {state("Обучение: "+e.getMessage());}
-                    finally {enrollmentRequested=false;}
-                    stream.release();stream=kws.createStream("");voiced=SystemClock.elapsedRealtime();
-                    continue;
-                }
-                Command pending=current;
-                SpokenRequest name=pending==null?null:pending.nameRequest;
-                if(name!=null && !pending.cancelled.isDone()) {
-                    pending.nameRequest=null;
-                    captureRequest(r,pending,name);
-                    stream.release(); stream=kws.createStream("");
-                    if(profile!=null) profile.reset();
-                    voiced=SystemClock.elapsedRealtime(); audit=voiced; frames=0; peak=0;
-                    continue;
-                }
-                int n=r.read(buf,0,buf.length,AudioRecord.READ_NON_BLOCKING);
-                if(n<0) throw new MicrophoneUnavailable("Ошибка микрофона "+n);
-                long now=SystemClock.elapsedRealtime();
-                if(n>0) {
-                    float[] input=new float[n];
-                    for(int j=0;j<n;j++) {input[j]=buf[j]/32768f; peak=Math.max(peak,Math.abs((int)buf[j])); if(buf[j]!=0) voiced=now;}
-                    frames+=n;
-                    stream.acceptWaveform(input,RATE);
-                    boolean hit=false;
-                    while(kws.isReady(stream)) {
-                        kws.decode(stream);
-                        if(!kws.getResult(stream).getKeyword().isEmpty()) {hit=true; break;}
-                    }
-                    boolean voiceHit=profile!=null && profile.accept(input);
-                    if(hit || voiceHit) {
-                        event(this,"wake via="+(hit?"text":"voice"));
-                        handleCommand(r,am);
-                        stream.release();
-                        stream=kws.createStream("");
-                        if(profile!=null) profile.reset();
-                        voiced=SystemClock.elapsedRealtime(); audit=voiced; frames=0; peak=0;
-                    }
-                } else SystemClock.sleep(12);
-                if(now-audit>5000) {
-                    inputStats="input="+route+" frames="+frames+" peak="+peak;
-                    event(this,inputStats);
-                    audit=now; frames=0; peak=0;
-                }
-                if(now-voiced>12000) throw new MicrophoneUnavailable("Микрофон не выдаёт звук в режиме ожидания");
-            }
-        } finally {
-            if(echo!=null) echo.release();
-            if(r!=null) r.release(); if(priming) am.setMode(AudioManager.MODE_NORMAL);
-            if(stream!=null) stream.release(); if(kws!=null) kws.release();
-        }
+
+    // Called by KeywordLoop on the listener thread.
+    boolean commandActive() {return current!=null;}
+    /** Enrollment takes the microphone, so the command in progress ends. */
+    void cancelCommand() throws Exception {
+        onMain(()->{if(current!=null) finishCommand(current,false,null);return true;});
     }
-    private VoiceProfile loadProfile(String phrase) {
-        File file=profileFile(this,phrase);
-        if(!file.isFile()) return null;
-        try(DataInputStream in=new DataInputStream(new BufferedInputStream(new FileInputStream(file)))) {
-            return VoiceProfile.read(in);
-        } catch(IOException e) {event(this,"Образец недоступен");return null;}
+    /** Record the clarification the current command is waiting for. Returns false when there is nothing to record. */
+    boolean captureClarification(AudioRecord r) {
+        Command pending=current;
+        SpokenRequest name=pending==null?null:pending.nameRequest;
+        if(name==null) return false;
+        pending.nameRequest=null;
+        // A tap in Spotify while the clarification was pending ends the command.
+        if(pending.cancelled.isDone()) {main.post(()->finishCommand(pending,false,null)); return false;}
+        captureRequest(r,pending,name);
+        return true;
     }
-    static File profileFile(Context c,String phrase) {
-        // Normalized input contains letters and spaces only.
-        return new File(c.getFilesDir(),"voice-profile-"+WakePhrase.normalize(phrase)+".bin");
-    }
-    private VoiceProfile enroll(AudioRecord r,String phrase) throws Exception {
-        float[][][] examples=new float[3][][];
-        for(int i=0;i<examples.length;i++) {
-            if(stopping || !enrollmentRequested) throw new CancellationException("отменено");
-            state("После сигнала скажите «"+phrase+"» · "+(i+1)+" из 3");
-            ToneGenerator tone=new ToneGenerator(AudioManager.STREAM_MUSIC,new VoiceSettings(this).get(VoiceSettings.VOLUME,65));
-            try {tone.startTone(ToneGenerator.TONE_PROP_ACK,180);SystemClock.sleep(230);} finally {tone.release();}
-            drain(r);
-            float[] audio=CabinMic.read(r,()->{},()->stopping || !enrollmentRequested);
-            examples[i]=VoiceProfile.features(audio);
-        }
-        VoiceProfile result=VoiceProfile.train(examples);
-        android.util.AtomicFile dest=new android.util.AtomicFile(profileFile(this,phrase));
-        FileOutputStream raw=dest.startWrite();
-        try {
-            DataOutputStream out=new DataOutputStream(new BufferedOutputStream(raw));
-            result.write(out);out.flush();dest.finishWrite(raw);
-        } catch(IOException e) {dest.failWrite(raw);throw e;}
-        return result;
-    }
-    private void drain(AudioRecord r) {
-        short[] discard=new short[2048];
-        for(int i=0;i<8 && r.read(discard,0,discard.length,AudioRecord.READ_NON_BLOCKING)>0;i++) {}
-    }
+    // beginCommand(AudioManager), finishCommand, select, searchWithFallback, spotter, status and Command.cancelled
+    // are also reached by reflection from voice/bench (BargeInCheck, ManualSelectionCheck, SearchPhase).
     private Command beginCommand(AudioManager audio) {
+        Command next=new Command(new VoiceSettings(this));
+        beginCommand(next,audio);
+        return next;
+    }
+    private void beginCommand(Command next,AudioManager audio) {
         if(stopping) throw new CancellationException();
-        Command next=new Command(new VoiceSettings(this)), previous=current;
+        Command previous=current;
         SearchService search=SearchService.instance;
         if(previous!=null) {
             boolean ownedPause=!previous.cancelled.isDone();
@@ -308,6 +172,9 @@ public class WakeService extends Service {
             event(this,"restart: previous search cancelled");
         }
         current=next;
+        // The model loads while the driver is still speaking. A replaced command passes its hold on.
+        speech.open(next.engine);
+        if(previous!=null) speech.close();
         if(search!=null) {
             String paused=search.pausePlayingTrack();
             if(!paused.isEmpty()) next.pausedTrack=paused;
@@ -318,11 +185,11 @@ public class WakeService extends Service {
                 .setOnAudioFocusChangeListener(x->{}).build();
             next.granted=audio.requestAudioFocus(next.focus)==AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
         }
-        return next;
     }
     private void finishCommand(Command command,boolean picked,String error) {
         if(current!=command) return;
         current=null;
+        speech.close();
         boolean manual=command.cancelled.isDone();
         command.cancelled.complete(true);
         SearchService search=SearchService.instance;
@@ -335,10 +202,12 @@ public class WakeService extends Service {
         if(error!=null && !manual) event(this,"Ошибка команды");
         if(!stopping) state(idleText());
     }
-    private void handleCommand(AudioRecord r,AudioManager am) throws Exception {
+    void handleCommand(AudioRecord r,AudioManager am) {
         if(stopping) return;
-        Command command=onMain(()->beginCommand(am));
+        Command command=new Command(new VoiceSettings(this));
         try {
+            // A busy main thread costs this command, not the listener.
+            onMain(()->{beginCommand(command,am);return true;});
             boolean confirmed=false;
             long until=SystemClock.elapsedRealtime()+800;
             do {
@@ -361,10 +230,10 @@ public class WakeService extends Service {
                 if(SearchService.instance!=null) SearchService.instance.prompt(prompt,true,10000);
                 return true;
             });
-            if(!listening) return;
+            if(!listening) {main.post(()->finishCommand(command,false,null)); return;}
             ToneGenerator tone=new ToneGenerator(AudioManager.STREAM_MUSIC,command.volume);
             try {tone.startTone(ToneGenerator.TONE_PROP_ACK,300);SystemClock.sleep(340);} finally {tone.release();}
-            drain(r);
+            CabinMic.drain(r);
             state(nameRequest==null?"Говорите название и исполнителя":prompt);
             float[] samples=CabinMic.read(r,()->{},()->stopping || command.cancelled.isDone());
             onMain(()->{
@@ -445,32 +314,18 @@ public class WakeService extends Service {
             int v=(int)(samples[i]*32768f);
             pcm[2*i]=(byte)v; pcm[2*i+1]=(byte)(v>>8);
         }
-        CompletableFuture<Bundle> response=new CompletableFuture<>();
-        Messenger reply=new Messenger(new Handler(Looper.getMainLooper(),m->{response.complete(m.getData());return true;}));
-        ServiceConnection conn=new ServiceConnection() {
-            @Override public void onServiceConnected(ComponentName name,IBinder binder) {
-                if(manualPick.isDone()) return;
-                Message m=Message.obtain(); Bundle data=new Bundle(); data.putByteArray("pcm",pcm);
-                data.putString("lang",language); data.putInt("engine",engine); m.setData(data); m.replyTo=reply;
-                try {new Messenger(binder).send(m);} catch(RemoteException e) {response.complete(new Bundle());}
+        Bundle b;
+        speech.open(engine);
+        try {b=speech.transcribe(pcm,language,engine,manualPick);}
+        finally {speech.close();}
+        if(!b.containsKey("text")) throw new IOException(b.getString("error","Распознаватель закрыт"));
+        onMain(()->{
+            if(!manualPick.isDone()) {
+                lastCommand+=" asrMs="+b.getLong("time")+" engine="+(engine==VoiceSettings.FUTO?"futo":"base")+" lang="+(language.isEmpty()?"ru/en":language);
+                event(this,lastCommand);
             }
-            @Override public void onServiceDisconnected(ComponentName n) {response.complete(new Bundle());}
-        };
-        if(!bindService(new Intent(this,SpeechWorker.class),conn,BIND_AUTO_CREATE)) throw new IOException("Распознаватель недоступен");
-        try {
-            try {CompletableFuture.anyOf(response,manualPick).get(24,TimeUnit.SECONDS);}
-            catch(TimeoutException elapsed) {throw new IOException("Истекло время распознавания",elapsed);}
-            if(manualPick.isDone()) throw new CancellationException();
-            Bundle b=response.get();
-            if(!b.containsKey("text")) throw new IOException(b.getString("error","Распознаватель закрыт"));
-            onMain(()->{
-                if(!manualPick.isDone()) {
-                    lastCommand+=" asrMs="+b.getLong("time")+" engine="+(engine==VoiceSettings.FUTO?"futo":"base")+" lang="+(language.isEmpty()?"ru/en":language);
-                    event(this,lastCommand);
-                }
-                return true;
-            });
-            return b.getString("text");
-        } finally {unbindService(conn);}
+            return true;
+        });
+        return b.getString("text");
     }
 }

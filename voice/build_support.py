@@ -23,7 +23,8 @@ def pinned_file(cache, name, url, expected):
             temp = Path(target.name)
         run(executable("curl"), "--fail", "--silent", "--show-error", "--location",
             "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "20",
-            "--max-time", "300", "--retry", "2", "--output", temp, url)
+            "--max-time", "300", "--retry", "4", "--retry-all-errors", "--retry-delay", "3",
+            "--output", temp, url)
         if sha256(temp) != expected:
             raise ValueError(f"Unexpected SHA-256 for {name} from {url}")
         temp.replace(path)

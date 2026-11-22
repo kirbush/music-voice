@@ -8,6 +8,11 @@ import java.util.function.BooleanSupplier;
 
 final class CabinMic {
     private static final int RATE=16000;
+    /** Discard what the input buffered before a prompt tone ended. */
+    static void drain(AudioRecord r) {
+        short[] discard=new short[2048];
+        for(int i=0;i<8 && r.read(discard,0,discard.length,AudioRecord.READ_NON_BLOCKING)>0;i++) {}
+    }
     static float[] read(AudioRecord r, Runnable ready, BooleanSupplier cancelled) {
         float[] all=new float[RATE*14];
         short[] buf=new short[640];
@@ -39,7 +44,7 @@ final class CabinMic {
             if(first<0 && count>RATE*8) break;
         }
         if(cancelled.getAsBoolean()) throw new IllegalStateException("Запись отменена");
-        if(first<0 || loudFrames<RATE/7) throw new IllegalStateException("Не услышал название. Нажмите «Повторить».");
+        if(first<0 || loudFrames<RATE/7) throw new IllegalStateException("Не услышал название.");
         return Arrays.copyOfRange(all,Math.max(0,first-RATE/3),Math.min(count,last+RATE/3));
     }
 }

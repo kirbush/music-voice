@@ -7,12 +7,21 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
 
 public class SpeechWorker extends Service {
+    /** Load the engine's model ahead of the recording. The request has no reply. */
+    static final int WARM=1;
     private final ExecutorService cpu=Executors.newSingleThreadExecutor();
     private final Messenger inbox=new Messenger(new Handler(Looper.getMainLooper(),msg->{
         byte[] pcm=msg.getData().getByteArray("pcm");
         Messenger reply=msg.replyTo;
         String lang=msg.getData().getString("lang","");
         int engine=msg.getData().getInt("engine",VoiceSettings.BASE);
+        if(msg.what==WARM) {
+            cpu.execute(()->{
+                try {if(engine==VoiceSettings.FUTO) FutoSpeech.warm(this); else LocalSpeech.warm(this);}
+                catch(Exception | LinkageError e) {android.util.Log.i("MusicVoice","warm: "+e.getClass().getSimpleName());}
+            });
+            return true;
+        }
         if(pcm==null || reply==null) return true;
         cpu.execute(()->{
             Message answer=Message.obtain();

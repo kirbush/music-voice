@@ -26,6 +26,7 @@ public class VoiceActivity extends Activity {
     private VoiceSettings settings;
     private RadioGroup delayOptions;
     private Button access;
+    private TextView spotifyNote;
     private Intent selectorSettings;
     private final android.os.Handler ui=new android.os.Handler(android.os.Looper.getMainLooper());
     private int dp(int value) {return Math.round(value*getResources().getDisplayMetrics().density);}
@@ -155,6 +156,9 @@ public class VoiceActivity extends Activity {
         access.setOnClickListener(v->showSelectorAccess());
         refreshAccessButton();
         add(listen,access,10);
+        spotifyNote=label("",15,SUB,false);
+        add(listen,spotifyNote,10);
+        refreshSpotifyNote();
         add(controls,label("Настройки поиска",26,Color.WHITE,true),0);
         engineOptions=options(controls,"Движок распознавания",VoiceSettings.ENGINE,VoiceSettings.BASE,
                 new String[]{"Whisper Base","FUTO‑74"},new int[]{VoiceSettings.BASE,VoiceSettings.FUTO});
@@ -242,6 +246,12 @@ public class VoiceActivity extends Activity {
                 selectorSettings==null?"Как включить автовыбор Spotify":"Настроить автовыбор Spotify";
         if(!android.text.TextUtils.equals(access.getText(),text)) access.setText(text);
     }
+    /** Shown only when the installed Spotify is not the version auto-selection was verified on. */
+    private void refreshSpotifyNote() {
+        String note=SpotifyUi.versionNote(SpotifyUi.installedVersion(this));
+        spotifyNote.setText(note);
+        spotifyNote.setVisibility(note.isEmpty()?android.view.View.GONE:android.view.View.VISIBLE);
+    }
     private boolean openSelectorSettings() {
         Intent open=selectorSettings;
         if(open==null) return false;
@@ -280,6 +290,7 @@ public class VoiceActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         selectorSettings=SelectorAccess.findSettings(this);
+        refreshSpotifyNote();
         refresh.run();
     }
     @Override protected void onPause() {ui.removeCallbacks(refresh); super.onPause();}
@@ -298,6 +309,7 @@ public class VoiceActivity extends Activity {
         if (r.length > 0 && r[0] == PackageManager.PERMISSION_GRANTED) enable();
         else WakeService.enrollmentRequested=false;
     }
+    // The two text overloads have no caller in the app. voice/bench invokes them by reflection (VoiceBench, FirstPassCheck).
     static void launchSearch(Context ctx,String text) {
         launchSearch(ctx,text,null);
     }
@@ -316,7 +328,7 @@ public class VoiceActivity extends Activity {
     }
     static void openQuery(Context ctx,String q) {
         Intent intent=new Intent(Intent.ACTION_VIEW,Uri.parse("spotify:search:"+Uri.encode(q)))
-                .setPackage(SearchService.SPOTIFY).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                .setPackage(SpotifyUi.PACKAGE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ctx.startActivity(intent);
     }
 }

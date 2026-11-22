@@ -23,8 +23,8 @@ import android.widget.TextView;
 import java.util.concurrent.CompletableFuture;
 
 // Only inspect the Spotify window during a pending user-initiated search.
+// instance, query, manualPick and pausePlayingTrack are also read by reflection from voice/bench (SearchPhase, FirstPassCheck).
 public class SearchService extends AccessibilityService {
-    static final String SPOTIFY = "com.spotify.music";
     static SearchService instance;
     final Handler handler = new Handler(Looper.getMainLooper());
     String query, kind, selectedTitle;
@@ -176,27 +176,32 @@ public class SearchService extends AccessibilityService {
     private void openSpotify(String text) {
         try {VoiceActivity.openQuery(this,text);}
         catch(ActivityNotFoundException noSearchHandler) {
-            Intent launcher=getPackageManager().getLaunchIntentForPackage(SPOTIFY);
+            Intent launcher=getPackageManager().getLaunchIntentForPackage(SpotifyUi.PACKAGE);
             if(launcher==null) throw noSearchHandler;
             startActivity(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         }
     }
+    /** Send another query to Spotify during a search. A failure ends the search instead of the process. */
+    private boolean reopen(String text) {
+        try {VoiceActivity.openQuery(this,text); return true;}
+        catch(ActivityNotFoundException|SecurityException unavailable) {cancel(); return false;}
+    }
     private static boolean isSpotify(AccessibilityNodeInfo root) {
-        return root!=null && SPOTIFY.equals(String.valueOf(root.getPackageName()));
+        return root!=null && SpotifyUi.PACKAGE.equals(String.valueOf(root.getPackageName()));
     }
     private static boolean spotifyUiReady(AccessibilityNodeInfo root) {
         // The splash window already belongs to Spotify, but has no navigation or search UI.
-        return !root.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/navigation_bar").isEmpty()
-                || !root.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/search_content_recyclerview").isEmpty();
+        return !root.findAccessibilityNodeInfosByViewId(SpotifyUi.NAVIGATION_BAR).isEmpty()
+                || !root.findAccessibilityNodeInfosByViewId(SpotifyUi.SEARCH_RESULTS).isEmpty();
     }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
         String sourcePackage=String.valueOf(event.getPackageName());
         if(event.getEventType()==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-                (SPOTIFY.equals(sourcePackage) || "com.qinggan.app.music".equals(sourcePackage) ||
+                (SpotifyUi.PACKAGE.equals(sourcePackage) || "com.qinggan.app.music".equals(sourcePackage) ||
                  "com.qinggan.media".equals(sourcePackage) || "com.android.car.media.localmediaplayer".equals(sourcePackage))) {
             ListenerEvents.requestStart(this,true);
         }
-        if(!SPOTIFY.equals(sourcePackage)) return;
+        if(!SpotifyUi.PACKAGE.equals(sourcePackage)) return;
         if(event.getEventType()==AccessibilityEvent.TYPE_VIEW_CLICKED
                 && (manualPick!=null || query!=null) && event.getEventTime()>=watchStarted) {
             AccessibilityNodeInfo source=event.getSource();
@@ -216,35 +221,34 @@ public class SearchService extends AccessibilityService {
         if (query != null && !handler.hasCallbacks(check)) handler.postDelayed(check, 200);
     }
     private static String textById(AccessibilityNodeInfo row, String id) {
-        for (AccessibilityNodeInfo n : row.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/"+id)) return value(n);
+        for (AccessibilityNodeInfo n : row.findAccessibilityNodeInfosByViewId(id)) return value(n);
         return "";
     }
     private AccessibilityNodeInfo playerButton() {
         AccessibilityNodeInfo root=getRootInActiveWindow();
-        if(root==null || !SPOTIFY.equals(String.valueOf(root.getPackageName()))) return null;
-        for(AccessibilityNodeInfo b:root.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/play_pause_button"))
+        if(!isSpotify(root)) return null;
+        for(AccessibilityNodeInfo b:root.findAccessibilityNodeInfosByViewId(SpotifyUi.PLAY_PAUSE))
             if(b.isVisibleToUser() && b.isClickable()) return b;
         return null;
     }
     String currentTrack() {
         AccessibilityNodeInfo root=getRootInActiveWindow();
-        if(root==null || !SPOTIFY.equals(String.valueOf(root.getPackageName()))) return "";
-        String title=textById(root,"track_info_view_title");
-        if(title.isEmpty()) title=textById(root,"track_info_view");
-        return title.isEmpty()?"":title+" / "+textById(root,"track_info_view_subtitle");
+        if(!isSpotify(root)) return "";
+        String title="";
+        for(String id:SpotifyUi.TRACK_TITLE) if(title.isEmpty()) title=textById(root,id);
+        return title.isEmpty()?"":title+" / "+textById(root,SpotifyUi.TRACK_ARTIST);
     }
     boolean paused() {
         AccessibilityNodeInfo b=playerButton();
-        return b!=null && norm(String.valueOf(b.getContentDescription())).matches("слушать|воспроизвести|play|play playback");
+        return b!=null && SpotifyUi.offersPlay(norm(String.valueOf(b.getContentDescription())));
     }
     String pausePlayingTrack() {
         AccessibilityNodeInfo b=playerButton();
         String id=currentTrack();
         AccessibilityNodeInfo root=getRootInActiveWindow();
-        if(root!=null && SPOTIFY.equals(String.valueOf(root.getPackageName()))) rememberArtist(textById(root,"track_info_view_subtitle"));
+        if(isSpotify(root)) rememberArtist(textById(root,SpotifyUi.TRACK_ARTIST));
         if(b==null || id.isEmpty()) return "";
-        String label=norm(String.valueOf(b.getContentDescription()));
-        if((label.startsWith("пауза") || label.startsWith("приостановить") || label.startsWith("pause"))
+        if(SpotifyUi.offersPause(norm(String.valueOf(b.getContentDescription())))
                 && b.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return id;
         return "";
     }
@@ -253,41 +257,8 @@ public class SearchService extends AccessibilityService {
         AccessibilityNodeInfo b=playerButton();
         if(b!=null) b.performAction(AccessibilityNodeInfo.ACTION_CLICK);
     }
-    boolean matches(String title, String subtitle) {
-        String[] candidates=norm(title+" "+subtitle).split(" ");
-        int exact=0, near=0;
-        String required=correction==null?originalQuery:query;
-        for(String word:required.split(" ")) {
-            boolean same=false, close=false;
-            for(String candidate:candidates) {
-                if(word.equals(candidate)) {same=true; break;}
-                if(word.length()>=4 && candidate.length()>=4 && oneEdit(word,candidate)) close=true;
-            }
-            if(same) exact++;
-            else if(close) near++;
-            else return false;
-        }
-        return exact>0 && near<=1;
-    }
-    private static boolean oneEdit(String left,String right) {
-        if(Math.abs(left.length()-right.length())>1) return false;
-        int a=0,b=0,errors=0;
-        while(a<left.length() && b<right.length()) {
-            if(left.charAt(a)==right.charAt(b)) {a++; b++; continue;}
-            if(++errors>1) return false;
-            if(left.length()>=right.length()) a++;
-            if(right.length()>=left.length()) b++;
-        }
-        return errors+left.length()-a+right.length()-b<=1;
-    }
-    boolean rightType(String subtitle) {
-        String s = norm(subtitle);
-        if (kind.equals("album")) return s.startsWith("альбом") || s.startsWith("album");
-        if (kind.equals("playlist")) return s.startsWith("плейлист") || s.startsWith("playlist");
-        return s.startsWith("трек") || s.startsWith("песня") || s.startsWith("song") || s.startsWith("track");
-    }
     private boolean showsQuery(AccessibilityNodeInfo node) {
-        if(node==null || (SPOTIFY+":id/row_root").equals(node.getViewIdResourceName())) return false;
+        if(node==null || SpotifyUi.ROW.equals(node.getViewIdResourceName())) return false;
         if(node.isVisibleToUser() && norm(value(node)).equals(query)) return true;
         for(int i=0;i<node.getChildCount();i++) if(showsQuery(node.getChild(i))) return true;
         return false;
@@ -316,10 +287,7 @@ public class SearchService extends AccessibilityService {
                 if(selectedTitle==null) {
                     boolean correctQuery=showsQuery(root);
                     if(correctQuery) timing.queryShown(now);
-                    else if(spotifyUiReady(root) && timing.shouldResendInSpotify(now)) {
-                        try {VoiceActivity.openQuery(SearchService.this,initialText);}
-                        catch(ActivityNotFoundException unavailable) { cancel(); return; }
-                    }
+                    else if(spotifyUiReady(root) && timing.shouldResendInSpotify(now) && !reopen(initialText)) return;
                     java.util.ArrayList<TitleCorrection.Row> candidates=new java.util.ArrayList<>();
                     java.util.ArrayList<TitleCorrection.Row> tracks=new java.util.ArrayList<>();
                     java.util.ArrayList<AccessibilityNodeInfo> trackNodes=new java.util.ArrayList<>();
@@ -327,8 +295,8 @@ public class SearchService extends AccessibilityService {
                     java.util.ArrayList<AccessibilityNodeInfo> artistNodes=new java.util.ArrayList<>();
                     boolean rankTracks=kind.equals("track") && correction==null;
                     boolean artistSearch=kind.equals("artist");
-                    if(correctQuery) for(AccessibilityNodeInfo row : root.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/row_root")) {
-                        String title=textById(row,"title"), subtitle=textById(row,"subtitle");
+                    if(correctQuery) for(AccessibilityNodeInfo row : root.findAccessibilityNodeInfosByViewId(SpotifyUi.ROW)) {
+                        String title=textById(row,SpotifyUi.ROW_TITLE), subtitle=textById(row,SpotifyUi.ROW_SUBTITLE);
                         if(!row.isVisibleToUser() || title.isEmpty()) continue;
                         TitleCorrection.Row candidate=new TitleCorrection.Row(title,subtitle);
                         candidates.add(candidate);
@@ -341,11 +309,11 @@ public class SearchService extends AccessibilityService {
                         if(artistSearch) continue;
                         if(correction!=null && (!norm(title).equals(norm(correction.title)) ||
                                 !(" "+norm(subtitle)+" ").contains(" "+norm(correction.artist)+" "))) continue;
-                        if(!rightType(subtitle)) continue;
+                        if(!SpotifyUi.isKind(kind,norm(subtitle))) continue;
                         if(rankTracks) {
                             tracks.add(candidate);
                             trackNodes.add(row);
-                        } else if(matches(title,subtitle) && chooseResult(row,title,subtitle,kind)) {
+                        } else if(TitleCorrection.wordsMatch(correction==null?originalQuery:query,title,subtitle) && chooseResult(row,title,subtitle,kind)) {
                             if(query==null) return;
                             break;
                         }
@@ -372,7 +340,7 @@ public class SearchService extends AccessibilityService {
                             String next=correction.artist+" "+correction.title;
                             query=norm(next);
                             WakeService.event(SearchService.this,"Исправление по выдаче Spotify");
-                            VoiceActivity.openQuery(SearchService.this,next);
+                            if(!reopen(next)) return;
                         } else if(!candidates.isEmpty()) {
                             if(now-resultsSince>1100 && !broadened) {
                                 String next=TitleCorrection.broader(originalQuery,artists);
@@ -380,15 +348,15 @@ public class SearchService extends AccessibilityService {
                                 if(!next.isEmpty() && !norm(next).equals(query)) {
                                     query=norm(next); resultsSince=0;
                                     WakeService.event(SearchService.this,"Уточнение по исполнителю");
-                                    VoiceActivity.openQuery(SearchService.this,next);
+                                    if(!reopen(next)) return;
                                 }
                             } else if(broadened && now-resultsSince>1900) {end(false); return;}
                         }
                     }
-                } else if(root.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/search_content_recyclerview").isEmpty()
+                } else if(root.findAccessibilityNodeInfosByViewId(SpotifyUi.SEARCH_RESULTS).isEmpty()
                         && !root.findAccessibilityNodeInfosByText(selectedTitle).isEmpty()) {
-                    for(String id : new String[]{"play_button","button_play","play_action"}) {
-                        for(AccessibilityNodeInfo n : root.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/"+id)) {
+                    for(String id : SpotifyUi.PAGE_PLAY) {
+                        for(AccessibilityNodeInfo n : root.findAccessibilityNodeInfosByViewId(id)) {
                             if(n.isVisibleToUser() && n.isClickable() && clickResult(n)) {end(true); return;}
                         }
                     }

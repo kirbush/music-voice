@@ -31,6 +31,12 @@ jobs:
           packages: 'platforms;android-30 build-tools;34.0.0 ndk;27.2.12479018 cmake;3.22.1'
       - name: Test
         run: python voice/build.py --test
+      # The build checks the SHA-256 of every cached file, so a stale or altered cache cannot reach the APK.
+      - name: Reuse pinned dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build/cache
+          key: pinned-dependencies-${{ hashFiles('voice/build.py', 'voice/native/build.py') }}
       - name: Build and verify
         run: python voice/build.py --output MusicVoice-arm64.apk
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
