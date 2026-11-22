@@ -16,4 +16,4 @@
 - **FUTO‑74** основан на [FUTO ACFT Whisper Base](https://huggingface.co/futo-org/acft-whisper-base) с лицензией Apache-2.0. [Метод и исходный GGML-файл FUTO](https://github.com/futo-org/whisper-acft). SHA-256 зеркала совпадает с исходной раздачей.
 - Для ключевой фразы используются [английская модель Zipformer GigaSpeech](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/) и [русская Zipformer/Vosk](https://huggingface.co/alphacep/vosk-model-small-streaming-ru). В исходники включены небольшие таблицы токенизации этих моделей. За условиями использования и атрибуцией моделей следуйте их карточкам.
 
-Тексты в этой папке описывают сторонние компоненты. Лицензия на собственный код приложения отдельно не объявлена.
+Тексты в этой папке описывают сторонние компоненты. Собственный код приложения распространяется по [лицензии MIT](../LICENSE).
