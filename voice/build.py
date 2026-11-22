@@ -62,14 +62,15 @@ def test_sources(config, platform_jar):
     source = HERE / "src/ru/local/voyah/musicsearch"
     tests = HERE / "bench"
     with tempfile.TemporaryDirectory(prefix="musicvoice-tests-") as temp:
+        test_names = ("TitleCorrectionTest", "ModelStoreTest", "SpotifySearchTimingTest")
         files = [source / (name + ".java") for name in
-                 ("SpokenRequest", "TitleCorrection", "ModelStore", "VoiceSettings")]
-        files += [tests / (name + ".java") for name in ("TitleCorrectionTest", "ModelStoreTest")]
+                 ("SpokenRequest", "TitleCorrection", "ModelStore", "VoiceSettings", "SpotifySearchTiming")]
+        files += [tests / (name + ".java") for name in test_names]
         run(jdk(config, "javac"), "-encoding", "UTF-8", "-cp", platform_jar, "-d", temp, *files)
         classpath = os.pathsep.join((temp, str(platform_jar)))
-        for name in ("TitleCorrectionTest", "ModelStoreTest"):
+        for name in test_names:
             run(jdk(config, "java"), "-cp", classpath, "ru.local.voyah.musicsearch." + name)
-    print("PASS parsing, Spotify result ranking and model downloader tests")
+    print("PASS parsing, Spotify result ranking, cold launch timing and model downloader tests")
 
 
 def package_assets(apk, dex, aar, futo):

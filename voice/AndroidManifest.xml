@@ -1,8 +1,9 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="ru.local.voyah.musicsearch" android:versionCode="12" android:versionName="0.12-search-test">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="ru.local.voyah.musicsearch" android:versionCode="13" android:versionName="0.13">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <queries><package android:name="com.spotify.music"/></queries>
     <application android:label="@string/app_name" android:icon="@drawable/voice_icon" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:usesCleartextTraffic="false" android:debuggable="false" android:extractNativeLibs="true">
         <activity android:name=".VoiceActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize|keyboardHidden|uiMode">
@@ -10,6 +11,12 @@
         </activity>
         <service android:name=".WakeService" android:exported="false" android:foregroundServiceType="microphone"/>
         <service android:name=".SpeechWorker" android:exported="false" android:process=":asr"/>
+        <receiver android:name=".ListenerEvents" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
         <service android:name=".SearchService" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
             <meta-data android:name="android.accessibilityservice" android:resource="@xml/search_service"/>

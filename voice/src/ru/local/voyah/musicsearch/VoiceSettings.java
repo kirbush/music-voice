@@ -16,6 +16,8 @@ final class VoiceSettings {
     int get(String key,int fallback) { return values.getInt(key,fallback); }
     void set(String key,int value) { values.edit().putInt(key,value).apply(); }
     int engine() { return get(ENGINE,BASE)==FUTO?FUTO:BASE; }
+    boolean listeningEnabled() {return values.getBoolean("listening_enabled",true);}
+    void setListeningEnabled(boolean enabled) {values.edit().putBoolean("listening_enabled",enabled).apply();}
     String language() {
         switch(get(LANGUAGE,0)) {
             case 1: return "ru";

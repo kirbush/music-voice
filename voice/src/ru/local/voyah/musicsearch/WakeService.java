@@ -12,6 +12,7 @@ import java.util.Arrays;
 import java.util.concurrent.*;
 
 public class WakeService extends Service {
+    static final String AUTOMATIC="ru.local.voyah.musicsearch.START_LISTENER";
     static volatile String status="Прослушивание выключено";
     static volatile boolean active;
     static volatile boolean enrollmentRequested;
@@ -28,6 +29,7 @@ public class WakeService extends Service {
     private final Handler main=new Handler(Looper.getMainLooper());
     private static final String CHANNEL="music_wake";
     private static final int RATE=16000;
+    private static final int START_REMINDER=32;
     private volatile String inputStats="Нет замера";
     private volatile String lastCommand="";
     private volatile String echoStatus="";
@@ -41,37 +43,69 @@ public class WakeService extends Service {
         android.util.Log.i("MusicVoice",line);
     }
     void state(String text) {
+        if(stopping) return;
         status=text;
 
         getSystemService(NotificationManager.class).notify(31,notice(text));
     }
-    private Notification notice(String text) {
-        Intent off=new Intent(this,WakeService.class).setAction("stop");
-        return new Notification.Builder(this,CHANNEL).setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle(getString(R.string.app_name)).setContentText(text).setOngoing(true)
-            .setContentIntent(PendingIntent.getActivity(this,0,new Intent(this,VoiceActivity.class),PendingIntent.FLAG_IMMUTABLE))
-            .addAction(android.R.drawable.ic_delete,"Выключить",PendingIntent.getService(this,0,off,PendingIntent.FLAG_IMMUTABLE)).build();
+    private static Notification.Builder notice(Context context,String text) {
+        Intent off=new Intent(context,ListenerEvents.class).setAction(ListenerEvents.STOP);
+        return new Notification.Builder(context,CHANNEL).setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle(context.getString(R.string.app_name)).setContentText(text)
+            .setContentIntent(PendingIntent.getActivity(context,0,new Intent(context,VoiceActivity.class),PendingIntent.FLAG_IMMUTABLE))
+            .addAction(android.R.drawable.ic_delete,"Выключить",PendingIntent.getBroadcast(context,0,off,PendingIntent.FLAG_IMMUTABLE));
+    }
+    private Notification notice(String text) {return notice(this,text).setOngoing(true).build();}
+    private static NotificationManager notifications(Context context) {
+        NotificationManager manager=context.getSystemService(NotificationManager.class);
+        manager.createNotificationChannel(new NotificationChannel(CHANNEL,"Голосовой поиск",NotificationManager.IMPORTANCE_LOW));
+        return manager;
+    }
+    static void showStartReminder(Context context) {
+        if(!new VoiceSettings(context).listeningEnabled()) return;
+        status="Откройте приложение и включите прослушивание";
+        notifications(context).notify(START_REMINDER,notice(context,status).build());
+    }
+    static void disable(Context context) {
+        new VoiceSettings(context).setListeningEnabled(false);
+        status="Прослушивание выключено";
+        context.getSystemService(NotificationManager.class).cancel(START_REMINDER);
+        context.stopService(new Intent(context,WakeService.class));
     }
     @Override public int onStartCommand(Intent i,int flags,int id) {
-        if(i!=null && "stop".equals(i.getAction())) {stopping=true; stopSelf(); return START_NOT_STICKY;}
-        getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel(CHANNEL,"Голосовой поиск",NotificationManager.IMPORTANCE_LOW));
-        startForeground(31,notice("Подготовка микрофона"),ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
-        if(!ModelStore.get(this,new VoiceSettings(this).engine()).ready) { status="Сначала скачайте модели";stopSelf();return START_NOT_STICKY; }
+        if(i!=null && "stop".equals(i.getAction())) {disable(this); return START_NOT_STICKY;}
         if(!active) {
-            active=true;
+            VoiceSettings settings=new VoiceSettings(this);
+            NotificationManager manager=notifications(this);
+            boolean automatic=i==null || AUTOMATIC.equals(i.getAction());
+            status="Подготовка микрофона";
+            try {
+                startForeground(31,notice(status),ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+            } catch(SecurityException|IllegalStateException blocked) {
+                if(automatic) showStartReminder(this);
+                else status="Микрофон недоступен";
+                stopSelf(); return START_NOT_STICKY;
+            }
+            if(!settings.listeningEnabled() || checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                    !=android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                status="Прослушивание выключено";stopSelf();return START_NOT_STICKY;
+            }
+            if(!ModelStore.get(this,settings.engine()).ready) {status="Сначала скачайте модели";stopSelf();return START_NOT_STICKY;}
+            manager.cancel(START_REMINDER);
             String route=i==null?null:i.getStringExtra("route");
-            new Thread(()->listen(route==null?"primeback":route),"Spotify keyword").start();
+            active=true;
+            new Thread(()->listen(route==null?"primeback":route,automatic),"Spotify keyword").start();
         }
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
     @Override public void onDestroy() {
-        stopping=true; enrollmentRequested=false;
+        stopping=true; active=false; enrollmentRequested=false;
         if(current!=null) finishCommand(current,false,null);
         super.onDestroy();
     }
     @Override public IBinder onBind(Intent i) {return null;}
 
-    private AudioRecord recorder(int source, String route) {
+    private AudioRecord recorder(int source) {
         AudioFormat fmt=new AudioFormat.Builder().setSampleRate(RATE).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_IN_MONO).build();
         AudioRecord r=new AudioRecord.Builder().setAudioSource(source).setAudioFormat(fmt)
                 .setPrivacySensitive(false).setBufferSizeInBytes(Math.max(8192,AudioRecord.getMinBufferSize(RATE,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT)*2)).build();
@@ -80,12 +114,47 @@ public class WakeService extends Service {
                 r.setPreferredDevice(d); break;
             }
         }
-        r.startRecording();
+        try {
+            r.startRecording();
+            if(r.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING) throw new MicrophoneUnavailable("Микрофон недоступен");
+        } catch(RuntimeException failure) {
+            r.release();
+            if(failure instanceof IllegalStateException && !(failure instanceof MicrophoneUnavailable)) {
+                throw new MicrophoneUnavailable("Микрофон недоступен",failure);
+            }
+            throw failure;
+        }
         return r;
+    }
+    private static final class MicrophoneUnavailable extends IllegalStateException {
+        MicrophoneUnavailable(String message) {super(message);}
+        MicrophoneUnavailable(String message,Throwable cause) {super(message,cause);}
     }
     static KeywordSpotter spotter(Context context) throws IOException {return WakePhrase.create(context,new VoiceSettings(context).phrase());}
     private String idleText() {return "Жду фразу «"+new VoiceSettings(this).phrase()+"»";}
-    private void listen(String route) {
+    private void listen(String route,boolean automatic) {
+        try {
+            try {listenSession(route);}
+            catch(MicrophoneUnavailable first) {
+                if(stopping) return;
+                state("Восстанавливаю вход микрофона");
+                SystemClock.sleep(1000);
+                if(!stopping) listenSession(route);
+            }
+        } catch(Exception | LinkageError e) {
+            if(!stopping) {
+                status=String.valueOf(e.getMessage());
+                event(this,"Ошибка слушателя: "+e.getClass().getSimpleName());
+                if (automatic && (e instanceof MicrophoneUnavailable || e instanceof SecurityException)) {
+                    main.post(()->{if(!stopping) showStartReminder(this);});
+                }
+            }
+        } finally {
+            searches.shutdown();
+            main.post(this::stopSelf);
+        }
+    }
+    private void listenSession(String route) throws Exception {
         AudioRecord r=null;
         AcousticEchoCanceler echo=null;
         KeywordSpotter kws=null;
@@ -100,10 +169,10 @@ public class WakeService extends Service {
             stream=kws.createStream("");
             if(route.startsWith("prime") && am.getMode()==AudioManager.MODE_NORMAL) {
                 am.setMode(AudioManager.MODE_IN_COMMUNICATION); priming=true;
-                AudioRecord warm=recorder(MediaRecorder.AudioSource.VOICE_COMMUNICATION,route);
+                AudioRecord warm=recorder(MediaRecorder.AudioSource.VOICE_COMMUNICATION);
                 try {SystemClock.sleep(700);} finally {warm.release();}
             }
-            r=recorder(route.endsWith("back")?MediaRecorder.AudioSource.CAMCORDER:MediaRecorder.AudioSource.MIC,route);
+            r=recorder(route.endsWith("back")?MediaRecorder.AudioSource.CAMCORDER:MediaRecorder.AudioSource.MIC);
             if(priming) {SystemClock.sleep(400); am.setMode(AudioManager.MODE_NORMAL); priming=false;}
             try {
                 if(AcousticEchoCanceler.isAvailable()) echo=AcousticEchoCanceler.create(r.getAudioSessionId());
@@ -135,7 +204,7 @@ public class WakeService extends Service {
                     continue;
                 }
                 int n=r.read(buf,0,buf.length,AudioRecord.READ_NON_BLOCKING);
-                if(n<0) throw new IllegalStateException("Ошибка микрофона "+n);
+                if(n<0) throw new MicrophoneUnavailable("Ошибка микрофона "+n);
                 long now=SystemClock.elapsedRealtime();
                 if(n>0) {
                     float[] input=new float[n];
@@ -162,16 +231,12 @@ public class WakeService extends Service {
                     event(this,inputStats);
                     audit=now; frames=0; peak=0;
                 }
-                if(now-voiced>12000) throw new IllegalStateException("Микрофон не выдаёт звук в режиме ожидания");
+                if(now-voiced>12000) throw new MicrophoneUnavailable("Микрофон не выдаёт звук в режиме ожидания");
             }
-        } catch(Exception | LinkageError e) {
-            status=String.valueOf(e.getMessage()); event(this,"Ошибка слушателя: "+e.getClass().getSimpleName());
         } finally {
-            searches.shutdown();
             if(echo!=null) echo.release();
             if(r!=null) r.release(); if(priming) am.setMode(AudioManager.MODE_NORMAL);
             if(stream!=null) stream.release(); if(kws!=null) kws.release();
-            active=false; stopSelf();
         }
     }
     private VoiceProfile loadProfile(String phrase) {
@@ -333,7 +398,8 @@ public class WakeService extends Service {
             VoiceActivity.launchSearch(this,request,result::complete);
             return true;
         });
-        try {return Boolean.TRUE.equals(CompletableFuture.anyOf(result,manualPick).get(9,TimeUnit.SECONDS));}
+        try {return Boolean.TRUE.equals(CompletableFuture.anyOf(result,manualPick)
+                .get(SpotifySearchTiming.MAX_WAIT_MS,TimeUnit.MILLISECONDS));}
         catch(TimeoutException elapsed) {return false;}
     }
     private String decode(float[] samples,String language,CompletableFuture<Boolean> manualPick,int engine) throws Exception {

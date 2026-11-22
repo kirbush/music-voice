@@ -134,7 +134,7 @@ public class VoiceActivity extends Activity {
         add(listen,label("После сигнала назовите трек и исполнителя.",17,SUB,false),16);
         toggle=action(WakeService.active?"Выключить прослушивание":"Включить прослушивание");
         toggle.setOnClickListener(v->{
-            if(WakeService.active) stopService(new Intent(this,WakeService.class));
+            if(WakeService.active) WakeService.disable(this);
             else if(!selectedModels().ready) toggleDownload(selectedModels());
             else enable();
         });
@@ -242,9 +242,8 @@ public class VoiceActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
             return;
         }
-        Intent intent = new Intent(this, WakeService.class);
-
-        startForegroundService(intent);
+        settings.setListeningEnabled(true);
+        startForegroundService(new Intent(this,WakeService.class));
     }
     @Override public void onRequestPermissionsResult(int code, String[] p, int[] r) {
         super.onRequestPermissionsResult(code, p, r);
@@ -259,17 +258,17 @@ public class VoiceActivity extends Activity {
     }
     static void launchSearch(Context ctx,SpokenRequest request,java.util.function.Consumer<Boolean> completed) {
         if(request.query.isEmpty()) throw new IllegalArgumentException("Название не распознано");
-        if(SearchService.instance!=null) SearchService.instance.arm(request.query,request.kind,completed);
-        else {
-            if(completed!=null) throw new IllegalStateException("Служба выбора Spotify отключена");
-            Toast.makeText(ctx,"Автовыбор выключен. Выберите трек на экране.",Toast.LENGTH_LONG).show();
+        if(SearchService.instance!=null) {
+            SearchService.instance.search(request.query,request.kind,completed);
+            return;
         }
-
+        if(completed!=null) throw new IllegalStateException("Служба выбора Spotify отключена");
+        Toast.makeText(ctx,"Автовыбор выключен. Выберите трек на экране.",Toast.LENGTH_LONG).show();
         openQuery(ctx,request.query);
     }
     static void openQuery(Context ctx,String q) {
         Intent intent=new Intent(Intent.ACTION_VIEW,Uri.parse("spotify:search:"+Uri.encode(q)))
-                .setPackage("com.spotify.music").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                .setPackage(SearchService.SPOTIFY).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ctx.startActivity(intent);
     }
 }

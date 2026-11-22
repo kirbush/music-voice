@@ -1,6 +1,6 @@
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged|typeViewClicked"
-    android:packageNames="com.spotify.music"
+    android:packageNames="com.spotify.music,com.qinggan.app.music,com.qinggan.media,com.android.car.media.localmediaplayer"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:notificationTimeout="0"
     android:accessibilityFlags="flagReportViewIds"

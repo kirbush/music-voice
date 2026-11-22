@@ -1,6 +1,8 @@
 package ru.local.voyah.musicsearch;
 
 import android.accessibilityservice.AccessibilityService;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -26,7 +28,9 @@ public class SearchService extends AccessibilityService {
     static SearchService instance;
     final Handler handler = new Handler(Looper.getMainLooper());
     String query, kind, selectedTitle;
-    long deadline;
+    private ListenerEvents.Monitor startupMonitor;
+    private SpotifySearchTiming timing;
+    private String initialText;
     private java.util.function.Consumer<Boolean> finished;
     private TitleCorrection correction;
     private String originalQuery="";
@@ -117,8 +121,19 @@ public class SearchService extends AccessibilityService {
     static String value(AccessibilityNodeInfo node) {
         return node == null || node.getText() == null ? "" : node.getText().toString();
     }
-    @Override protected void onServiceConnected() { instance = this; }
-    @Override public void onDestroy() { onInterrupt(); handler.removeCallbacks(removeBanner); removeBanner.run(); instance = null; super.onDestroy(); }
+    @Override protected void onServiceConnected() {
+        instance=this;
+        if(startupMonitor==null) startupMonitor=new ListenerEvents.Monitor(this,handler);
+        ListenerEvents.requestStart(this,false);
+    }
+    @Override public void onDestroy() {
+        if(startupMonitor!=null) startupMonitor.close();
+        onInterrupt();
+        handler.removeCallbacks(removeBanner);
+        removeBanner.run();
+        instance=null;
+        super.onDestroy();
+    }
     @Override public void onInterrupt() {
         if(manualPick!=null) manualPick.complete(true);
         manualPick=null;
@@ -127,23 +142,57 @@ public class SearchService extends AccessibilityService {
     }
     void cancel() { end(false); }
     void end(boolean picked) {
-        query=null; selectedTitle=null; correction=null; handler.removeCallbacks(check);
+        query=null; selectedTitle=null; correction=null; timing=null; initialText=null;
+        handler.removeCallbacks(check);
         java.util.function.Consumer<Boolean> cb=finished;
         finished=null;
         if(cb!=null) cb.accept(picked);
     }
-    void arm(String text, String type,java.util.function.Consumer<Boolean> callback) {
+    void search(String text, String type,java.util.function.Consumer<Boolean> callback) {
         cancel();
         finished=callback;
         query = norm(text);
         originalQuery=query; broadened=false; resultsSince=0;
+        initialText=text;
+        AccessibilityNodeInfo root=getRootInActiveWindow();
+        boolean spotifyVisible=isSpotify(root) && spotifyUiReady(root);
+        if(root!=null) root.recycle();
+        timing=new SpotifySearchTiming(SystemClock.elapsedRealtime(),spotifyVisible);
         prompt("Ищу: "+text,false,3000);
         kind = type;
-        deadline = SystemClock.elapsedRealtime()+8000;
+        try {
+            openSpotify(text);
+        } catch(RuntimeException failure) {
+            cancel();
+            throw failure;
+        }
         handler.postDelayed(check, 500);
     }
+    private void openSpotify(String text) {
+        try {VoiceActivity.openQuery(this,text);}
+        catch(ActivityNotFoundException noSearchHandler) {
+            Intent launcher=getPackageManager().getLaunchIntentForPackage(SPOTIFY);
+            if(launcher==null) throw noSearchHandler;
+            startActivity(launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        }
+    }
+    private static boolean isSpotify(AccessibilityNodeInfo root) {
+        return root!=null && SPOTIFY.equals(String.valueOf(root.getPackageName()));
+    }
+    private static boolean spotifyUiReady(AccessibilityNodeInfo root) {
+        // The splash window already belongs to Spotify, but has no navigation or search UI.
+        return !root.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/navigation_bar").isEmpty()
+                || !root.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/search_content_recyclerview").isEmpty();
+    }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
-        if(event.getEventType()==AccessibilityEvent.TYPE_VIEW_CLICKED && SPOTIFY.contentEquals(String.valueOf(event.getPackageName()))
+        String sourcePackage=String.valueOf(event.getPackageName());
+        if(event.getEventType()==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                (SPOTIFY.equals(sourcePackage) || "com.qinggan.app.music".equals(sourcePackage) ||
+                 "com.qinggan.media".equals(sourcePackage) || "com.android.car.media.localmediaplayer".equals(sourcePackage))) {
+            ListenerEvents.requestStart(this,true);
+        }
+        if(!SPOTIFY.equals(sourcePackage)) return;
+        if(event.getEventType()==AccessibilityEvent.TYPE_VIEW_CLICKED
                 && (manualPick!=null || query!=null) && event.getEventTime()>=watchStarted) {
             AccessibilityNodeInfo source=event.getSource();
             boolean automated=ownClick!=null && ownClick.equals(source) && event.getEventTime()>=ownClickTime
@@ -252,14 +301,20 @@ public class SearchService extends AccessibilityService {
     final Runnable check = new Runnable() {
         @Override public void run() {
             if(query==null) return;
-            if(SystemClock.elapsedRealtime()>=deadline) {
+            long now=SystemClock.elapsedRealtime();
+            if(timing.expired(now)) {
                 if(finished==null) Toast.makeText(SearchService.this,"Подходящий результат не подтверждён. Выберите его в поиске.",Toast.LENGTH_LONG).show();
                 cancel(); return;
             }
             AccessibilityNodeInfo root=getRootInActiveWindow();
-            if(root!=null && SPOTIFY.contentEquals(root.getPackageName()==null ? "" : root.getPackageName())) {
+            if(isSpotify(root)) {
                 if(selectedTitle==null) {
                     boolean correctQuery=showsQuery(root);
+                    if(correctQuery) timing.queryShown(now);
+                    else if(spotifyUiReady(root) && timing.shouldResendInSpotify(now)) {
+                        try {VoiceActivity.openQuery(SearchService.this,initialText);}
+                        catch(ActivityNotFoundException unavailable) { cancel(); return; }
+                    }
                     java.util.ArrayList<TitleCorrection.Row> candidates=new java.util.ArrayList<>();
                     java.util.ArrayList<TitleCorrection.Row> tracks=new java.util.ArrayList<>();
                     java.util.ArrayList<AccessibilityNodeInfo> trackNodes=new java.util.ArrayList<>();
@@ -295,7 +350,6 @@ public class SearchService extends AccessibilityService {
                             WakeService.event(SearchService.this,"Исправление по выдаче Spotify");
                             VoiceActivity.openQuery(SearchService.this,next);
                         } else if(!candidates.isEmpty()) {
-                            long now=SystemClock.elapsedRealtime();
                             if(resultsSince==0) resultsSince=now;
                             if(now-resultsSince>1100 && !broadened) {
                                 String next=TitleCorrection.broader(originalQuery,artists);
