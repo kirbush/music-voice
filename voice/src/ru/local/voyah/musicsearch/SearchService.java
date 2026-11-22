@@ -31,6 +31,7 @@ public class SearchService extends AccessibilityService {
     private ListenerEvents.Monitor startupMonitor;
     private SpotifySearchTiming timing;
     private String initialText;
+    private boolean inferArtist;
     private java.util.function.Consumer<Boolean> finished;
     private TitleCorrection correction;
     private String originalQuery="";
@@ -148,9 +149,10 @@ public class SearchService extends AccessibilityService {
         finished=null;
         if(cb!=null) cb.accept(picked);
     }
-    void search(String text, String type,java.util.function.Consumer<Boolean> callback) {
+    void search(SpokenRequest request,java.util.function.Consumer<Boolean> callback) {
         cancel();
         finished=callback;
+        String text=request.query;
         query = norm(text);
         originalQuery=query; broadened=false; resultsSince=0;
         initialText=text;
@@ -159,7 +161,8 @@ public class SearchService extends AccessibilityService {
         if(root!=null) root.recycle();
         timing=new SpotifySearchTiming(SystemClock.elapsedRealtime(),spotifyVisible);
         prompt("Ищу: "+text,false,3000);
-        kind = type;
+        kind=request.kind;
+        inferArtist=!request.explicitKind;
         try {
             openSpotify(text);
         } catch(RuntimeException failure) {
@@ -279,7 +282,6 @@ public class SearchService extends AccessibilityService {
         String s = norm(subtitle);
         if (kind.equals("album")) return s.startsWith("альбом") || s.startsWith("album");
         if (kind.equals("playlist")) return s.startsWith("плейлист") || s.startsWith("playlist");
-        if (kind.equals("artist")) return s.startsWith("исполнитель") || s.startsWith("artist");
         return s.startsWith("трек") || s.startsWith("песня") || s.startsWith("song") || s.startsWith("track");
     }
     private boolean showsQuery(AccessibilityNodeInfo node) {
@@ -288,13 +290,14 @@ public class SearchService extends AccessibilityService {
         for(int i=0;i<node.getChildCount();i++) if(showsQuery(node.getChild(i))) return true;
         return false;
     }
-    private boolean chooseResult(AccessibilityNodeInfo node,String title,String subtitle) {
+    private boolean chooseResult(AccessibilityNodeInfo node,String title,String subtitle,String type) {
         if(!clickResult(node)) return false;
-        WakeService.event(this,"selected: "+kind);
+        WakeService.event(this,"selected: "+type);
         int marker=subtitle.indexOf('•');
-        if(marker>=0) rememberArtist(subtitle.substring(marker+1));
+        if(type.equals("artist")) rememberArtist(title);
+        else if(marker>=0) rememberArtist(subtitle.substring(marker+1));
         prompt(title,false,1600);
-        if(kind.equals("track")) end(true);
+        if(type.equals("track") || type.equals("artist")) end(true);
         else selectedTitle=title;
         return true;
     }
@@ -318,31 +321,50 @@ public class SearchService extends AccessibilityService {
                     java.util.ArrayList<TitleCorrection.Row> candidates=new java.util.ArrayList<>();
                     java.util.ArrayList<TitleCorrection.Row> tracks=new java.util.ArrayList<>();
                     java.util.ArrayList<AccessibilityNodeInfo> trackNodes=new java.util.ArrayList<>();
+                    java.util.ArrayList<TitleCorrection.Row> artistsFound=new java.util.ArrayList<>();
+                    java.util.ArrayList<AccessibilityNodeInfo> artistNodes=new java.util.ArrayList<>();
                     boolean rankTracks=kind.equals("track") && correction==null;
+                    boolean artistSearch=kind.equals("artist");
                     if(correctQuery) for(AccessibilityNodeInfo row : root.findAccessibilityNodeInfosByViewId(SPOTIFY+":id/row_root")) {
                         String title=textById(row,"title"), subtitle=textById(row,"subtitle");
                         if(!row.isVisibleToUser() || title.isEmpty()) continue;
                         TitleCorrection.Row candidate=new TitleCorrection.Row(title,subtitle);
                         candidates.add(candidate);
+                        if(!row.isClickable()) continue;
+                        if((artistSearch || (rankTracks && inferArtist)) && TitleCorrection.isArtist(candidate)) {
+                            artistsFound.add(candidate);
+                            artistNodes.add(row);
+                            continue;
+                        }
+                        if(artistSearch) continue;
                         if(correction!=null && (!norm(title).equals(norm(correction.title)) ||
                                 !(" "+norm(subtitle)+" ").contains(" "+norm(correction.artist)+" "))) continue;
-                        if(!row.isClickable() || !rightType(subtitle)) continue;
+                        if(!rightType(subtitle)) continue;
                         if(rankTracks) {
                             tracks.add(candidate);
                             trackNodes.add(row);
-                        } else if(matches(title,subtitle) && chooseResult(row,title,subtitle)) {
+                        } else if(matches(title,subtitle) && chooseResult(row,title,subtitle,kind)) {
                             if(query==null) return;
                             break;
                         }
                     }
+                    if(resultsSince==0 && !candidates.isEmpty()) resultsSince=now;
                     int best=rankTracks?TitleCorrection.bestTrack(originalQuery,tracks):TitleCorrection.NO_TRACK;
                     if(best>=0) {
                         TitleCorrection.Row track=tracks.get(best);
-                        if(chooseResult(trackNodes.get(best),track.title,track.subtitle)) return;
+                        if(chooseResult(trackNodes.get(best),track.title,track.subtitle,"track")) return;
+                    }
+                    if(artistSearch || (rankTracks && inferArtist && best==TitleCorrection.NO_TRACK &&
+                            resultsSince!=0 && now-resultsSince>=900)) {
+                        int artist=TitleCorrection.bestArtist(originalQuery,artistsFound);
+                        if(artist>=0) {
+                            TitleCorrection.Row card=artistsFound.get(artist);
+                            if(chooseResult(artistNodes.get(artist),card.title,card.subtitle,"artist")) return;
+                        }
                     }
                     if(correctQuery && rankTracks && best==TitleCorrection.NO_TRACK) {
                         java.util.List<String> artists=artistHistory();
-                        for(TitleCorrection.Row row:candidates) if(norm(row.subtitle).equals("исполнитель") || norm(row.subtitle).equals("artist")) artists.add(row.title);
+                        for(TitleCorrection.Row row:candidates) if(TitleCorrection.isArtist(row)) artists.add(row.title);
                         correction=TitleCorrection.suggest(originalQuery,candidates,artists);
                         if(correction!=null) {
                             String next=correction.artist+" "+correction.title;
@@ -350,7 +372,6 @@ public class SearchService extends AccessibilityService {
                             WakeService.event(SearchService.this,"Исправление по выдаче Spotify");
                             VoiceActivity.openQuery(SearchService.this,next);
                         } else if(!candidates.isEmpty()) {
-                            if(resultsSince==0) resultsSince=now;
                             if(now-resultsSince>1100 && !broadened) {
                                 String next=TitleCorrection.broader(originalQuery,artists);
                                 broadened=true;

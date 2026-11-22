@@ -179,7 +179,39 @@ final class TitleCorrection {
                 best=i; top=score;
             } else if(!same) rival=Math.max(rival,score);
         }
-        return best>=0 && top-rival<4?AMBIGUOUS_TRACK:best;
+        if(best<0 || top-rival>=4) return best;
+        return best==0 && hasConfirmedTitleLeader(query,tracks)?best:AMBIGUOUS_TRACK;
+    }
+    private static boolean hasConfirmedTitleLeader(String query,List<Row> tracks) {
+        Row first=tracks.get(0);
+        if(!query.equals(norm(first.title))) return false;
+        String lead=norm(trackCredit(first.subtitle));
+        for(int i=1;i<tracks.size();i++) {
+            Row row=tracks.get(i);
+            if(!query.equals(norm(row.title))) continue;
+            String credit=norm(trackCredit(row.subtitle));
+            if(!credit.isEmpty()) return sameName(lead,credit);
+        }
+        return false;
+    }
+    static boolean isArtist(Row row) {
+        String subtitle=norm(row.subtitle);
+        return subtitle.equals("исполнитель") || subtitle.equals("artist");
+    }
+    static int bestArtist(String spoken,List<Row> rows) {
+        String query=norm(spoken);
+        if(query.isEmpty()) return -1;
+        int best=-1, top=0;
+        for(int i=0;i<rows.size();i++) {
+            Row row=rows.get(i);
+            if(!isArtist(row)) continue;
+            String name=norm(row.title);
+            int score=query.equals(name)?2:sameName(query,name)?1:0;
+            if(score>top) {
+                top=score; best=i;
+            } else if(score>0 && score==top) best=-1;
+        }
+        return best;
     }
     private static boolean closePhrase(String heard,String expected) {
         int shorter=Math.min(heard.length(),expected.length());

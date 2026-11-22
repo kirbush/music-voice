@@ -65,6 +65,37 @@ final class TitleCorrectionTest {
         assertTrack("Queen Under Pressure",Arrays.asList(
             new TitleCorrection.Row("Under Pressure","Трек • Queen, David Bowie"),
             new TitleCorrection.Row("Under Pressure","Трек • Roadrunner United")),0);
+        TitleCorrection.Row depeche=new TitleCorrection.Row("Enjoy the Silence","Трек • Depeche Mode");
+        TitleCorrection.Row otherRelease=new TitleCorrection.Row("Enjoy The Silence","Трек • Depeche Mode");
+        TitleCorrection.Row cover=new TitleCorrection.Row("Enjoy the Silence","Трек • Trevor Something");
+        TitleCorrection.Row similar=new TitleCorrection.Row(
+                "Here In My Arms (Enjoy The Silence)","Трек • Armin van Buuren, Silver Panda");
+        assertTrack("Enjoy the silence",Arrays.asList(depeche,otherRelease,similar,cover),0);
+        assertTrack("Enjoy the Silence",Arrays.asList(depeche,cover),TitleCorrection.AMBIGUOUS_TRACK);
+        assertTrack("Enjoy the Silence",Arrays.asList(depeche,cover,otherRelease),TitleCorrection.AMBIGUOUS_TRACK);
+        assertTrack("Enjoy the Silence Trevor Something",Arrays.asList(depeche,otherRelease,cover),2);
+        assertRequest("Включи группу Depeche Mode","Depeche Mode","artist");
+        assertRequest("Включи исполнителя Depeche Mode","Depeche Mode","artist");
+        assertRequest("Включи трек Enjoy the Silence","Enjoy the Silence","track");
+        assertRequest("Включи песню Enjoy the Silence","Enjoy the Silence","track");
+        assertRequest("Поставь песня Enjoy the Silence","Enjoy the Silence","track");
+        if(SpokenRequest.parse("Depeche Mode").explicitKind ||
+                !SpokenRequest.parse("Включи трек Enjoy the Silence").explicitKind)
+            throw new AssertionError("Unqualified names and explicit tracks have different result types");
+        assertFollowUp("Включи группу", "Depeche Mode","artist");
+        assertFollowUp("Включи исполнителя.", "Depeche Mode","artist");
+        assertFollowUp("In the key group", "Depeche Mode","artist");
+        assertFollowUp("Включи трек", "Enjoy the Silence","track");
+        assertFollowUp("Включи песню", "Enjoy the Silence","track");
+        assertRequest("Song","Song","track");
+        TitleCorrection.Row artist=new TitleCorrection.Row("Depeche Mode","Исполнитель");
+        List<TitleCorrection.Row> mixed=Arrays.asList(depeche,artist,cover,
+                new TitleCorrection.Row("Depeche Mode Tribute","Исполнитель"));
+        if(TitleCorrection.bestArtist("Depeche Mode",mixed)!=1 ||
+                TitleCorrection.bestArtist("Enjoy the Silence",mixed)>=0 ||
+                TitleCorrection.bestArtist("Art",mixed)>=0 ||
+                TitleCorrection.bestArtist("Depeche Mode",Arrays.asList(artist,artist))>=0)
+            throw new AssertionError("Only an unambiguous matching artist card can be opened");
         System.out.println(hit.artist+" / "+hit.title+" score="+hit.score);
     }
     private static void assertRequest(String spoken,String query,String kind) {
@@ -74,5 +105,12 @@ final class TitleCorrectionTest {
     private static void assertTrack(String spoken,List<TitleCorrection.Row> rows,int expected) {
         int result=TitleCorrection.bestTrack(SpokenRequest.parse(spoken).query,rows);
         if(result!=expected) throw new AssertionError(spoken+" -> row "+result+", expected "+expected);
+    }
+    private static void assertFollowUp(String first,String name,String kind) {
+        SpokenRequest initial=SpokenRequest.parse(first);
+        SpokenRequest next=initial.withName(name);
+        if(!initial.needsName() || next.needsName() || !next.explicitKind ||
+                !name.equals(next.query) || !kind.equals(next.kind))
+            throw new AssertionError("Lost request type during follow-up: "+first);
     }
 }

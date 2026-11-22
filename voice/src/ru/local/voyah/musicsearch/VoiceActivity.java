@@ -259,7 +259,7 @@ public class VoiceActivity extends Activity {
     static void launchSearch(Context ctx,SpokenRequest request,java.util.function.Consumer<Boolean> completed) {
         if(request.query.isEmpty()) throw new IllegalArgumentException("Название не распознано");
         if(SearchService.instance!=null) {
-            SearchService.instance.search(request.query,request.kind,completed);
+            SearchService.instance.search(request,completed);
             return;
         }
         if(completed!=null) throw new IllegalStateException("Служба выбора Spotify отключена");

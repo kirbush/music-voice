@@ -22,9 +22,18 @@ public class WakeService extends Service {
     private volatile Command current;
     private static final class Command {
         final CompletableFuture<Boolean> cancelled=new CompletableFuture<>();
+        final String language;
+        final int retryDelay,engine,volume;
+        volatile SpokenRequest nameRequest;
         String pausedTrack="";
         AudioFocusRequest focus;
         boolean granted;
+        Command(VoiceSettings settings) {
+            language=settings.language();
+            retryDelay=settings.get(VoiceSettings.DELAY,VoiceSettings.DEFAULT_DELAY);
+            engine=settings.engine();
+            volume=settings.get(VoiceSettings.VOLUME,VoiceSettings.DEFAULT_VOLUME);
+        }
     }
     private final Handler main=new Handler(Looper.getMainLooper());
     private static final String CHANNEL="music_wake";
@@ -203,6 +212,16 @@ public class WakeService extends Service {
                     stream.release();stream=kws.createStream("");voiced=SystemClock.elapsedRealtime();
                     continue;
                 }
+                Command pending=current;
+                SpokenRequest name=pending==null?null:pending.nameRequest;
+                if(name!=null && !pending.cancelled.isDone()) {
+                    pending.nameRequest=null;
+                    captureRequest(r,pending,name);
+                    stream.release(); stream=kws.createStream("");
+                    if(profile!=null) profile.reset();
+                    voiced=SystemClock.elapsedRealtime(); audit=voiced; frames=0; peak=0;
+                    continue;
+                }
                 int n=r.read(buf,0,buf.length,AudioRecord.READ_NON_BLOCKING);
                 if(n<0) throw new MicrophoneUnavailable("Ошибка микрофона "+n);
                 long now=SystemClock.elapsedRealtime();
@@ -276,7 +295,7 @@ public class WakeService extends Service {
     }
     private Command beginCommand(AudioManager audio) {
         if(stopping) throw new CancellationException();
-        Command next=new Command(), previous=current;
+        Command next=new Command(new VoiceSettings(this)), previous=current;
         SearchService search=SearchService.instance;
         if(previous!=null) {
             boolean ownedPause=!previous.cancelled.isDone();
@@ -317,7 +336,6 @@ public class WakeService extends Service {
     private void handleCommand(AudioRecord r,AudioManager am) throws Exception {
         if(stopping) return;
         Command command=onMain(()->beginCommand(am));
-        VoiceSettings settings=new VoiceSettings(this);
         try {
             boolean confirmed=false;
             long until=SystemClock.elapsedRealtime()+800;
@@ -328,16 +346,25 @@ public class WakeService extends Service {
             } while(SystemClock.elapsedRealtime()<until);
             lastCommand="Перед записью: pauseConfirmed="+confirmed+" explicit="+!command.pausedTrack.isEmpty()+" focus="+command.granted;
             event(this,lastCommand);
-            onMain(()->{if(current==command && SearchService.instance!=null) SearchService.instance.prompt("Слушаю",true,10000);return true;});
-            ToneGenerator tone=new ToneGenerator(AudioManager.STREAM_MUSIC,settings.get(VoiceSettings.VOLUME,VoiceSettings.DEFAULT_VOLUME));
+            captureRequest(r,command,null);
+        } catch(Exception | LinkageError e) {
+            main.post(()->finishCommand(command,false,String.valueOf(e.getMessage())));
+        }
+    }
+    private void captureRequest(AudioRecord r,Command command,SpokenRequest nameRequest) {
+        String prompt=nameRequest==null?"Слушаю":nameRequest.namePrompt();
+        try {
+            boolean listening=onMain(()->{
+                if(stopping || current!=command || command.cancelled.isDone()) return false;
+                if(SearchService.instance!=null) SearchService.instance.prompt(prompt,true,10000);
+                return true;
+            });
+            if(!listening) return;
+            ToneGenerator tone=new ToneGenerator(AudioManager.STREAM_MUSIC,command.volume);
             try {tone.startTone(ToneGenerator.TONE_PROP_ACK,300);SystemClock.sleep(340);} finally {tone.release();}
             drain(r);
-            state("Говорите название и исполнителя");
-            float[] samples=CabinMic.read(r,()->{},()->stopping);
-
-            final String lang=settings.language();
-            final int wait=settings.get(VoiceSettings.DELAY,VoiceSettings.DEFAULT_DELAY);
-            final int engine=settings.engine();
+            state(nameRequest==null?"Говорите название и исполнителя":prompt);
+            float[] samples=CabinMic.read(r,()->{},()->stopping || command.cancelled.isDone());
             onMain(()->{
                 if(current==command) {
                     state("Распознаю название…");
@@ -345,18 +372,25 @@ public class WakeService extends Service {
                 }
                 return true;
             });
-            searches.execute(()->recognizeAndSelect(command,samples,lang,wait,engine));
+            searches.execute(()->recognizeAndSelect(command,samples,nameRequest));
         } catch(Exception | LinkageError e) {
             main.post(()->finishCommand(command,false,String.valueOf(e.getMessage())));
         }
     }
-    private void recognizeAndSelect(Command command,float[] samples,String lang,int wait,int engine) {
+    private void recognizeAndSelect(Command command,float[] samples,SpokenRequest nameRequest) {
         boolean picked=false;
         String error=null;
         try {
-            String text=decode(samples,lang,command.cancelled,engine);
-            picked=searchWithFallback(text,samples,command.cancelled,lang,wait,engine);
-            if(!picked) error="Подходящий трек не найден";
+            String text=decode(samples,command.language,command.cancelled,command.engine);
+            SpokenRequest request=nameRequest==null?SpokenRequest.parse(text):nameRequest.withName(text);
+            if(nameRequest==null && request.needsName() && !command.cancelled.isDone()) {
+                // The microphone thread captures the next utterance for this command.
+                command.nameRequest=request;
+                return;
+            }
+            if(!request.query.isEmpty()) picked=searchWithFallback(request,samples,command.cancelled,
+                    command.language,command.retryDelay,command.engine);
+            if(!picked) error="Подходящий результат не найден";
         } catch(CancellationException ignored) {
             // A new wake word or a Spotify tap owns the interaction.
         } catch(Exception | LinkageError failure) {error=String.valueOf(failure.getMessage());}
@@ -365,9 +399,8 @@ public class WakeService extends Service {
         main.post(()->finishCommand(command,result,message));
     }
 
-    private boolean searchWithFallback(String text,float[] samples,CompletableFuture<Boolean> manualPick,
+    private boolean searchWithFallback(SpokenRequest request,float[] samples,CompletableFuture<Boolean> manualPick,
                                        String preferredLanguage,int extraWait,int engine) throws Exception {
-        SpokenRequest request=SpokenRequest.parse(text);
         if(select(request,manualPick)) return true;
         if(stopping || !preferredLanguage.isEmpty()) return false;
         event(this,"manual-wait-ms="+extraWait);
@@ -376,9 +409,9 @@ public class WakeService extends Service {
         } catch(TimeoutException elapsed) {
             if(manualPick.isDone()) return true;
         }
-        String language=text.matches("(?s).*\\p{IsCyrillic}.*")?"en":"ru";
+        String language=request.query.matches("(?s).*\\p{IsCyrillic}.*")?"en":"ru";
         onMain(()->{if(!manualPick.isDone()) state("Проверяю название ещё раз…");return true;});
-        SpokenRequest alternate=SpokenRequest.parse(decode(samples,language,manualPick,engine));
+        SpokenRequest alternate=request.withName(decode(samples,language,manualPick,engine));
         return manualPick.isDone() || (!request.sameSearchAs(alternate) && select(alternate,manualPick));
     }
     private <T> T onMain(Callable<T> operation) throws Exception {
