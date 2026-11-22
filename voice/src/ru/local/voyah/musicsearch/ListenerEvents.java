@@ -26,6 +26,7 @@ public final class ListenerEvents extends BroadcastReceiver {
             WakeService.disable(context);
         } else if (Intent.ACTION_BOOT_COMPLETED.equals(action) ||
                    Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) {
+            if(Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) SelectorAccess.recordAfterUpdate(context);
             requestStart(context, false);
         }
     }

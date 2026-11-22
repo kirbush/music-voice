@@ -25,7 +25,8 @@ public class VoiceActivity extends Activity {
     private Button enrollment;
     private VoiceSettings settings;
     private RadioGroup delayOptions;
-    private TextView access;
+    private Button access;
+    private Intent selectorSettings;
     private final android.os.Handler ui=new android.os.Handler(android.os.Looper.getMainLooper());
     private int dp(int value) {return Math.round(value*getResources().getDisplayMetrics().density);}
     private android.graphics.drawable.GradientDrawable surface(int color,int radius) {
@@ -79,7 +80,7 @@ public class VoiceActivity extends Activity {
                 int engine=(Integer)choice.getTag();
                 choice.setEnabled(engine==settings.engine() || (engine==VoiceSettings.FUTO?futoModels:baseModels).ready);
             }
-            access.setVisibility(SearchService.instance==null?android.view.View.VISIBLE:android.view.View.GONE);
+            refreshAccessButton();
             ui.postDelayed(this,600);
         }
     };
@@ -150,9 +151,9 @@ public class VoiceActivity extends Activity {
                     if(!WakeService.active) enable();
                 }).show());
         add(listen,enroll,8);
-        access=action("Разрешить выбор в Spotify");
-        access.setOnClickListener(v->startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)));
-        access.setVisibility(SearchService.instance==null?android.view.View.VISIBLE:android.view.View.GONE);
+        access=action("Настроить автовыбор Spotify");
+        access.setOnClickListener(v->showSelectorAccess());
+        refreshAccessButton();
         add(listen,access,10);
         add(controls,label("Настройки поиска",26,Color.WHITE,true),0);
         engineOptions=options(controls,"Движок распознавания",VoiceSettings.ENGINE,VoiceSettings.BASE,
@@ -233,7 +234,54 @@ public class VoiceActivity extends Activity {
         add(parent,group,7); return group;
     }
 
-    @Override protected void onResume() {super.onResume(); refresh.run();}
+    private void refreshAccessButton() {
+        boolean connected=SearchService.instance!=null;
+        access.setVisibility(connected?android.view.View.GONE:android.view.View.VISIBLE);
+        if(connected) return;
+        String text=SelectorAccess.configured(this)?"Состояние автовыбора Spotify":
+                selectorSettings==null?"Как включить автовыбор Spotify":"Настроить автовыбор Spotify";
+        if(!android.text.TextUtils.equals(access.getText(),text)) access.setText(text);
+    }
+    private boolean openSelectorSettings() {
+        Intent open=selectorSettings;
+        if(open==null) return false;
+        try {
+            startActivity(open);
+            return true;
+        } catch(ActivityNotFoundException|SecurityException unavailable) {
+            selectorSettings=null;
+            refreshAccessButton();
+            return false;
+        }
+    }
+    private void showSelectorAccess() {
+        if(SearchService.instance!=null) return;
+        boolean configured=SelectorAccess.configured(this);
+        if(!configured && selectorSettings!=null && openSelectorSettings()) return;
+
+        String text=configured
+                ?"Служба «Музыка голосом» включена, но Android её ещё не подключил."
+                :"Для выбора и запуска трека нужна служба специальных возможностей «Музыка голосом».";
+        if(selectorSettings==null) {
+            text+="\n\nВ этой прошивке нет доступного экрана специальных возможностей. "
+                +"Для настройки нужен системный инструмент с правом включать такие службы.";
+        } else {
+            text+="\n\nОткройте специальные возможности и выключите, затем снова включите «Музыка голосом».";
+        }
+        String afterUpdate=SelectorAccess.updateStatus(this);
+        if(!afterUpdate.isEmpty()) text+="\n\nСразу после последнего обновления автовыбор был "+afterUpdate+".";
+        android.app.AlertDialog.Builder dialog=new android.app.AlertDialog.Builder(this)
+                .setTitle("Автовыбор Spotify").setMessage(text).setNegativeButton("Закрыть",null);
+        if(selectorSettings!=null) dialog.setPositiveButton("Открыть настройки",(d,which)->{
+            if(!openSelectorSettings()) showSelectorAccess();
+        });
+        dialog.show();
+    }
+    @Override protected void onResume() {
+        super.onResume();
+        selectorSettings=SelectorAccess.findSettings(this);
+        refresh.run();
+    }
     @Override protected void onPause() {ui.removeCallbacks(refresh); super.onPause();}
     @Override protected void onStop() {WakeService.enrollmentRequested=false; super.onStop();}
     private void enable() {

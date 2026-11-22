@@ -47,6 +47,8 @@ public class WakeService extends Service {
         writer.println(inputStats);
         writer.println(echoStatus);
         writer.println(lastCommand);
+        String afterUpdate=SelectorAccess.updateStatus(this);
+        if(!afterUpdate.isEmpty()) writer.println("Автовыбор после обновления: "+afterUpdate);
     }
     static void event(Context c,String line) {
         android.util.Log.i("MusicVoice",line);
