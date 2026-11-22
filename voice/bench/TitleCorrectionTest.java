@@ -74,6 +74,9 @@ final class TitleCorrectionTest {
         assertTrack("Enjoy the Silence",Arrays.asList(depeche,cover),TitleCorrection.AMBIGUOUS_TRACK);
         assertTrack("Enjoy the Silence",Arrays.asList(depeche,cover,otherRelease),TitleCorrection.AMBIGUOUS_TRACK);
         assertTrack("Enjoy the Silence Trevor Something",Arrays.asList(depeche,otherRelease,cover),2);
+        assertTrack("With kliuchi trek and joy the silence",Arrays.asList(depeche,otherRelease,similar,cover),0);
+        assertTrack("Enjoy the Science",Arrays.asList(depeche,otherRelease,cover),TitleCorrection.NO_TRACK);
+        assertTrack("Thank",Arrays.asList(new TitleCorrection.Row("Thank You","Трек • Dido")),TitleCorrection.NO_TRACK);
         assertRequest("Включи группу Depeche Mode","Depeche Mode","artist");
         assertRequest("Включи исполнителя Depeche Mode","Depeche Mode","artist");
         assertRequest("Включи трек Enjoy the Silence","Enjoy the Silence","track");
@@ -86,7 +89,14 @@ final class TitleCorrectionTest {
         assertFollowUp("Включи исполнителя.", "Depeche Mode","artist");
         assertFollowUp("In the key group", "Depeche Mode","artist");
         assertFollowUp("Включи трек", "Enjoy the Silence","track");
+        assertFollowUp("Включи рек", "Enjoy the Silence","track");
+        assertFollowUp("With kliuchi trek", "Enjoy the Silence","track");
         assertFollowUp("Включи песню", "Enjoy the Silence","track");
+        assertRequest("Включи рек Enjoy the Silence","Enjoy the Silence","track");
+        assertRequest("With kliuchi trek and joy the silence","Enjoy the silence","track");
+        assertRequest("Включи трек And Joy To You","And Joy To You","track");
+        assertRequest("With kliuchi trek And Joy","And Joy","track");
+        assertRequest("Рек","Рек","track");
         assertRequest("Song","Song","track");
         TitleCorrection.Row artist=new TitleCorrection.Row("Depeche Mode","Исполнитель");
         List<TitleCorrection.Row> mixed=Arrays.asList(depeche,artist,cover,

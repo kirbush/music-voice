@@ -163,7 +163,7 @@ final class TitleCorrection {
                 score=Math.max(score,86);
             }
         }
-        return score>0?score:query.contains(" ") && closePhrase(joined,compact(title))?70:0;
+        return score;
     }
     static int bestTrack(String spoken,List<Row> tracks) {
         String query=norm(spoken);
@@ -212,13 +212,6 @@ final class TitleCorrection {
             } else if(score>0 && score==top) best=-1;
         }
         return best;
-    }
-    private static boolean closePhrase(String heard,String expected) {
-        int shorter=Math.min(heard.length(),expected.length());
-        if(shorter<8 || Math.abs(heard.length()-expected.length())>4 || expected.length()>180) return false;
-        double score=similarity(heard,expected);
-        long errors=Math.round((1-score)*Math.max(heard.length(),expected.length()));
-        return score>=0.80 && errors<=Math.min(4,shorter/5);
     }
     static TitleCorrection suggest(String query,List<Row> rows) {
         return suggest(query,rows,java.util.Collections.emptyList());
